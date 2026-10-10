@@ -37,6 +37,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node scripts/run-unit-tests.mjs",
+    "test:config": "node --test tests/unit/*.test.mjs",
+    "test:integration": "node --test tests/integration/proxy-guards.test.mjs",
+    "test:integration:live": "GEV_LIVE_TESTS=1 node --test tests/integration/proxy-live.test.mjs",
+    "test:all": "npm test && npm run test:config && npm run test:integration",
     "test:track": "node scripts/track-regression.mjs",
     "qa:map-source-tray": "node scripts/qa-map-source-tray.mjs"
   },
