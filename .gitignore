@@ -10,3 +10,17 @@ output/
 .DS_Store
 .gstack/
 3d-models/
+
+# Secrets — never commit (repo-level so every clone is covered)
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials.json
+service-account*.json
+secrets.*

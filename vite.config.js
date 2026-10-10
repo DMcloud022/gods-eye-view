@@ -5717,10 +5717,12 @@ function openAiRealtimeProxy() {
               }
             } catch { /* fall through to error */ }
           }
-          const errMsg = data.error?.message || `Voice service error (HTTP ${omniRes.status})`;
+          // Upstream auth errors can quote a (masked) key — log the detail
+          // server-side only and give the browser a generic message.
+          if (data.error?.message) console.warn('[GEV Voice] upstream error:', data.error.message);
           res.statusCode = 502;
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ error: errMsg }));
+          res.end(JSON.stringify({ error: `Voice service error (HTTP ${omniRes.status})` }));
           return;
         }
         const message = data.choices?.[0]?.message || {};
