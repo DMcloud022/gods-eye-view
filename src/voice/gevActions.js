@@ -147,12 +147,24 @@ const LAYER_ALIASES = new Map([
   ['aircraft', 'flights'],
   ['military', 'military'],
   ['military flights', 'military'],
+  ['military-installations', 'military-installations'],
+  ['military installations', 'military-installations'],
+  ['installations', 'military-installations'],
+  ['military bases', 'military-installations'],
+  ['bases', 'military-installations'],
+  ['military-awareness', 'military-awareness'],
+  ['military awareness', 'military-awareness'],
+  ['airspace awareness', 'military-awareness'],
+  ['restricted airspace', 'military-awareness'],
   ['earthquakes', 'earthquakes'],
   ['quakes', 'earthquakes'],
   ['satellites', 'satellites'],
   ['space mission', 'rocket-launches'],
   ['space missions', 'rocket-launches'],
   ['missions', 'rocket-launches'],
+  ['rocket launches', 'rocket-launches'],
+  ['rocket launch', 'rocket-launches'],
+  ['launches', 'rocket-launches'],
   ['traffic', 'traffic'],
   ['street traffic', 'traffic'],
   ['cctv', 'cctv'],
@@ -176,6 +188,20 @@ const LAYER_ALIASES = new Map([
   ['firms', 'local-firms'],
   ['fires', 'local-firms'],
   ['active fires', 'local-firms'],
+  ['noaa-alerts', 'noaa-alerts'],
+  ['noaa alerts', 'noaa-alerts'],
+  ['weather alerts', 'noaa-alerts'],
+  ['nws alerts', 'noaa-alerts'],
+  ['weather warnings', 'noaa-alerts'],
+  ['storm warnings', 'noaa-alerts'],
+  ['sigmet', 'aviation-sigmets'],
+  ['sigmets', 'aviation-sigmets'],
+  ['aviation-sigmets', 'aviation-sigmets'],
+  ['aviation sigmets', 'aviation-sigmets'],
+  ['aviation hazards', 'aviation-sigmets'],
+  ['turbulence', 'aviation-sigmets'],
+  ['icing', 'aviation-sigmets'],
+  ['volcanic ash', 'aviation-sigmets'],
 ]);
 
 const CITY_ALIASES = new Map([
@@ -187,9 +213,9 @@ const CITY_ALIASES = new Map([
   ['washington d.c.', 'dc'],
 ]);
 
-// Basemap stack vocabulary. Switching requires an explicit stack name
-// ("Bing aerial", "road map", "OSM", "Google 3D") — any "satellite(s)"
-// phrasing ALWAYS means the satellites DATA LAYER, never a basemap; the
+// Basemap stack vocabulary. Switching requires an explicit phrase such as
+// "dark map", "Esri imagery", "satellite with labels", "OSM", "Google 3D".
+// Any bare "satellite(s)" phrasing ALWAYS means the satellites DATA LAYER, never a basemap; the
 // session instructions carry the decision table.
 //
 // Road phrasings resolve to OSM, the one shipped road basemap. Every alias
@@ -202,18 +228,39 @@ const STACK_ALIASES = new Map([
   ['google', 'photoreal'],
   ['3d', 'photoreal'],
   ['photorealistic', 'photoreal'],
-  ['bing-aerial', 'bing-aerial'],
-  ['bing aerial', 'bing-aerial'],
-  ['bing-labels', 'bing-labels'],
-  ['bing labels', 'bing-labels'],
-  ['labels', 'bing-labels'],
-  ['aerial with labels', 'bing-labels'],
+  // satellite imagery without labels
+  ['maptiler-satellite', 'maptiler-satellite'],
+  ['maptiler satellite', 'maptiler-satellite'],
+  ['satellite imagery', 'maptiler-satellite'],
+  // satellite + labels
+  ['maptiler-hybrid', 'maptiler-hybrid'],
+  ['maptiler hybrid', 'maptiler-hybrid'],
+  ['hybrid', 'maptiler-hybrid'],
+  ['satellite with labels', 'maptiler-hybrid'],
+  ['aerial with labels', 'maptiler-hybrid'],
+  // Esri World Imagery
+  ['esri-satellite', 'esri-satellite'],
+  ['esri satellite', 'esri-satellite'],
+  ['esri imagery', 'esri-satellite'],
+  ['esri', 'esri-satellite'],
+  ['aerial', 'esri-satellite'],
+  // dark basemap
+  ['carto-dark', 'carto-dark'],
+  ['carto dark', 'carto-dark'],
+  ['dark', 'carto-dark'],
+  ['dark map', 'carto-dark'],
+  // road / OSM
   ['osm', 'osm'],
   ['openstreetmap', 'osm'],
   ['open street map', 'osm'],
   ['road', 'osm'],
   ['roads', 'osm'],
   ['road map', 'osm'],
+  // legacy Bing aliases → nearest current equivalent
+  ['bing-aerial', 'esri-satellite'],
+  ['bing aerial', 'esri-satellite'],
+  ['bing-labels', 'maptiler-hybrid'],
+  ['bing labels', 'maptiler-hybrid'],
 ]);
 
 /** Search order for track_entity across entity layer families. */
@@ -765,6 +812,7 @@ export function createGevActionRunner({ viewer, styleManager, dataManager, scene
 
     if (name === 'fly_to_location') {
       return flyToRequestedLocation(viewer, args, {
+        signal: runOptions.signal,
         runImmediate: typeof styleManager?.runImmediateLocationNavigation === 'function'
           ? (navigate) => styleManager.runImmediateLocationNavigation(navigate)
           : null,
@@ -1260,15 +1308,13 @@ async function resolveRadioLocation(args = {}, coordinates = radioCoordinatePair
   const known = knownRadioLocation(query, args.locationId);
   if (known) return known;
   if (!query) return null;
-  const apiKey = window.__GOOGLE_MAPS_API_KEY__ || import.meta.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) throw new Error('No Google Maps API key available for Radio location search');
   const controller = new AbortController();
   const cancelFromTurn = () => controller.abort();
   if (options.signal?.aborted) throw radioAbortError();
   options.signal?.addEventListener('abort', cancelFromTurn, { once: true });
   const timer = setTimeout(() => controller.abort(), 6000);
   try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
+    const url = `/api/geocode?q=${encodeURIComponent(query)}`;
     const response = await fetch(url, { signal: controller.signal });
     const body = await response.json();
     if (!radioActionIsCurrent(options)) throw radioAbortError();
@@ -2203,6 +2249,7 @@ function normalizeStyle(value) {
 
 async function flyToRequestedLocation(viewer, args, {
   onStart = null,
+  signal = null,
   runImmediate = null,
   beginDeferred = null,
   reassertDeferred = null,
@@ -2323,6 +2370,7 @@ async function flyToRequestedLocation(viewer, args, {
       // previously dropped here, so "overview of Zilker Park" flew to a rooftop.
       viewMode: args.viewMode || null,
       duration: 2.2,
+      signal,
       ...arrivalHooks,
       beforeFly: managedDeferred ? () => reassertDeferred(generation) : null,
       onStart: managedDeferred ? null : onStart,
@@ -2934,15 +2982,14 @@ function inferCountry(latitude, longitude) {
 }
 
 async function reverseGeocode(latitude, longitude) {
-  const apiKey = window.__GOOGLE_MAPS_API_KEY__;
-  if (!apiKey || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
   const key = reverseGeocodeKey(latitude, longitude);
   if (reverseGeocodeCache.has(key)) return reverseGeocodeCache.get(key);
   if (reverseGeocodeInFlight.has(key)) return reverseGeocodeInFlight.get(key);
 
   const request = (async () => {
     try {
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(`${latitude},${longitude}`)}&key=${apiKey}`;
+      const url = `/api/geocode?latlng=${encodeURIComponent(`${latitude},${longitude}`)}`;
       const response = await fetchWithTimeout(url, {}, 5000);
       const data = await response.json();
       if (data.status !== 'OK' || !data.results?.length) {

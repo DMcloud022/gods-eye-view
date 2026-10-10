@@ -10,20 +10,40 @@ export const MAP_STACKS = [
     requiresIon: false,
   },
   {
-    id: 'bing-aerial',
-    label: 'Bing Aerial',
-    shortLabel: 'Aerial',
-    kind: 'ion',
-    style: Cesium.IonWorldImageryStyle.AERIAL,
-    requiresIon: true,
+    id: 'maptiler-satellite',
+    label: 'Satellite',
+    shortLabel: 'SAT',
+    kind: 'maptiler',
+    style: 'satellite-v2',
+    tileExt: 'jpg',
+    requiresIon: false,
   },
   {
-    id: 'bing-labels',
-    label: 'Bing Labels',
-    shortLabel: 'Labels',
-    kind: 'ion',
-    style: Cesium.IonWorldImageryStyle.AERIAL_WITH_LABELS,
-    requiresIon: true,
+    id: 'maptiler-hybrid',
+    label: 'Hybrid',
+    shortLabel: 'HYB',
+    kind: 'maptiler',
+    style: 'hybrid',
+    tileExt: 'png',
+    requiresIon: false,
+  },
+  {
+    id: 'esri-satellite',
+    label: 'Esri Imagery',
+    shortLabel: 'ESRI',
+    kind: 'esri',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer',
+    requiresIon: false,
+  },
+  {
+    id: 'carto-dark',
+    label: 'Dark Map',
+    shortLabel: 'DARK',
+    kind: 'urltemplate',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    subdomains: ['a', 'b', 'c', 'd'],
+    credit: '© CARTO © OpenStreetMap contributors',
+    requiresIon: false,
   },
   {
     id: 'osm',
@@ -62,7 +82,9 @@ export class MapStackController {
     this.cesiumToken = String(cesiumToken || '').trim();
     this._onChange = onChange;
     this._onError = onError;
-    this._activeId = googleTileset ? initialStack : 'osm';
+    // Prefer satellite imagery by default; ESRI World Imagery is free and
+    // requires no API key, so it serves as the keyless satellite fallback.
+    this._activeId = googleTileset ? initialStack : (import.meta.env.MAPTILER_API_KEY ? 'maptiler-satellite' : 'esri-satellite');
     this._imageryLayer = null;
     this._imageryProviders = new Map();
     this._isSwitching = false;
@@ -116,7 +138,7 @@ export class MapStackController {
    */
   _unavailableReason(stack) {
     return stack?.requiresIon
-      ? 'Cesium ion token required for Bing stacks'
+      ? 'Cesium ion token required'
       : `${stack?.label || 'This map stack'} is unavailable`;
   }
 
@@ -254,8 +276,39 @@ export class MapStackController {
     }
 
     let provider;
-    if (stack.kind === 'ion') {
-      provider = await Cesium.createWorldImageryAsync({ style: stack.style });
+    if (stack.kind === 'esri') {
+      provider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(stack.url, {
+        enablePickFeatures: false,
+      });
+    } else if (stack.kind === 'urltemplate') {
+      provider = new Cesium.UrlTemplateImageryProvider({
+        url: stack.url.replace('{r}', window.devicePixelRatio >= 2 ? '@2x' : ''),
+        subdomains: stack.subdomains || [],
+        minimumLevel: 0,
+        maximumLevel: 19,
+        credit: new Cesium.Credit(stack.credit || ''),
+      });
+    } else if (stack.kind === 'maptiler') {
+      const maptilerKey = import.meta.env.MAPTILER_API_KEY;
+      if (!maptilerKey) {
+        // No MapTiler key — serve ESRI World Imagery as a free keyless alternative.
+        // (Original: throw new Error('MAPTILER_API_KEY not set — add a free key from maptiler.com'))
+        provider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer',
+          { enablePickFeatures: false },
+        );
+      } else {
+        const ext = stack.tileExt || 'jpg';
+        const hiDpi = window.devicePixelRatio >= 2 ? '@2x' : '';
+        provider = new Cesium.UrlTemplateImageryProvider({
+          url: `https://api.maptiler.com/maps/${stack.style || 'satellite-v2'}/{z}/{x}/{y}${hiDpi}.${ext}?key=${maptilerKey}`,
+          minimumLevel: 0,
+          maximumLevel: 20,
+          tileWidth: hiDpi ? 512 : 256,
+          tileHeight: hiDpi ? 512 : 256,
+          credit: new Cesium.Credit('© MapTiler © OpenStreetMap contributors', true),
+        });
+      }
     } else if (stack.kind === 'osm') {
       provider = new Cesium.OpenStreetMapImageryProvider({
         url: 'https://tile.openstreetmap.org/',
@@ -300,6 +353,7 @@ export class MapStackController {
     if (enabled) {
       this.viewer.scene.setTerrain(Cesium.Terrain.fromWorldTerrain({
         requestVertexNormals: true,
+        requestWaterMask: true,
       }));
     } else {
       const provider = await this._getKeylessTerrainProvider();

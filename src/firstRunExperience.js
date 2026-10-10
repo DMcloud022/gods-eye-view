@@ -85,6 +85,11 @@ export function environmentalLabel(choice = ENVIRONMENTAL_LABEL_CHOICE) {
  * layer isolation and rollback stay in exactly one place.
  */
 
+// Vite's `define` substitutes the exact `import.meta.env.FIRMS_AVAILABLE` text
+// (always true: EONET is the keyless fire fallback). Outside Vite — the Node
+// unit tests — `import.meta.env` is undefined, so mirror the shipped value.
+const FIRMS_AVAILABLE = import.meta.env ? import.meta.env.FIRMS_AVAILABLE : true;
+
 /** @type {Readonly<Record<string, object>>} */
 export const FIRST_RUN_MISSIONS = Object.freeze({
   contacts: Object.freeze({
@@ -99,21 +104,14 @@ export const FIRST_RUN_MISSIONS = Object.freeze({
   }),
   environmental: Object.freeze({
     kind: 'globe',
-    // Live USGS earthquakes AND NASA FIRMS active fires. The launcher optimizes
-    // for the FULLY CONFIGURED experience (product decision, 2026-08-23): the tile
-    // promises both, so it turns on both, and the subcopy in index.html says so.
-    //
-    // Keyless, FIRMS is honest where it counts — its own layer row reads
-    // "UNAVAILABLE · NASA FIRMS · LIVE · KEY REQUIRED", and the quakes half of
-    // the tile still delivers in full. What is NOT honest is the GLOBAL status
-    // chip, which has no key-required terminal state and folds that row into
-    // "LOAD FAILED". That aggregation is the defect, not this preset: fixing it
-    // means a KEY REQUIRED terminal state in src/loadingFeedback.js, a state
-    // machine shared by every layer and not a thing to refactor the night
-    // before a launch. LEDGERED post-launch. Until it lands, keyless visitors
-    // are judged on the layer row, which tells them the truth.
-    layerIds: Object.freeze(['earthquakes', 'local-firms']),
-    busyText: 'Scanning active events…',
+    layerIds: Object.freeze(
+      FIRMS_AVAILABLE
+        ? ['earthquakes', 'local-firms']
+        : ['earthquakes'],
+    ),
+    busyText: FIRMS_AVAILABLE
+      ? 'Scanning active events…'
+      : 'Loading earthquakes… (add a free NASA FIRMS key to enable active fires)',
   }),
   explore: Object.freeze({ kind: 'none' }),
 });

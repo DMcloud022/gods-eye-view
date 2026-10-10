@@ -1,6 +1,6 @@
 // MAP STACK source chips — the always-visible replacement for the `<select>`
 // that used to sit in the Map Stack panel. One button per stack, rendered from
-// `MapStackController.getStacks()`. The four accepted sources below are
+// `MapStackController.getStacks()`. The six accepted sources below are
 // the whole shipped set; keeping the allowlist explicit means a stack added to
 // `MAP_STACKS` for internal use cannot reach the tray until someone names it
 // here.
@@ -13,8 +13,10 @@
 export const MAP_STACK_CHIP_CLASS = 'map-stack-chip';
 export const PRESENTED_MAP_STACK_IDS = Object.freeze([
   'photoreal',
-  'bing-aerial',
-  'bing-labels',
+  'maptiler-satellite',
+  'maptiler-hybrid',
+  'esri-satellite',
+  'carto-dark',
   'osm',
 ]);
 

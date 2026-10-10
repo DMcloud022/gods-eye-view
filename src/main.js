@@ -12,6 +12,8 @@ import cctvLayer from './data/cctv.js';
 import radioLayer from './data/radio.js';
 import bikeshareLayer from './data/bikeshare.js';
 import aisLiveVesselsLayer from './data/aisLiveVessels.js';
+import noaaAlertsLayer from './data/noaaAlerts.js';
+import aviationSigmetsLayer from './data/aviationSigmets.js';
 import militaryInstallationsLayer from './data/militaryInstallations.js';
 import militaryAwarenessLayer from './data/militaryAwareness.js';
 import localDataLayers from './data/localLayers.js';
@@ -79,15 +81,12 @@ async function init() {
       Cesium.Ion.defaultAccessToken = cesiumToken;
     }
 
-    // Set Google Maps API key for 3D Tiles
+    // Set Google Maps API key for 3D Tiles (optional — falls back to OSM + free geocoding)
     const googleApiKey = import.meta.env.GOOGLE_MAPS_API_KEY;
-    if (!googleApiKey) {
-      throw new Error('GOOGLE_MAPS_API_KEY not found. Set it as an environment variable.');
+    if (googleApiKey) {
+      Cesium.GoogleMaps.defaultApiKey = googleApiKey;
+      window.__GOOGLE_MAPS_API_KEY__ = googleApiKey;
     }
-    Cesium.GoogleMaps.defaultApiKey = googleApiKey;
-
-    // Expose API key globally for geocoding in locations.js
-    window.__GOOGLE_MAPS_API_KEY__ = googleApiKey;
 
     // Create the Cesium viewer with minimal chrome
     const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -133,6 +132,24 @@ async function init() {
     // 120 Hz hardware; a no-op on 60 Hz displays. (perf item 2)
     viewer.targetFrameRate = 60;
 
+    // HDR tone-mapping — richer color depth on supported GPU
+    viewer.scene.highDynamicRange = true;
+
+    // Smooth atmospheric haze at mid-to-far distances
+    viewer.scene.fog.enabled = true;
+    viewer.scene.fog.density = 0.0002;
+    viewer.scene.fog.screenSpaceErrorFactor = 2.0;
+
+    // Sun-based lighting on globe stacks (inert when globe.show = false)
+    viewer.scene.globe.enableLighting = true;
+    viewer.scene.globe.atmosphereLightIntensity = 18.0;
+
+    // Sharper globe imagery — default SSE is 2.0, lower = crisper tiles
+    viewer.scene.globe.maximumScreenSpaceError = 1.5;
+
+    // FXAA on by default in Cesium, make it explicit
+    viewer.scene.postProcessStages.fxaa.enabled = true;
+
     // Register per-layer data attribution into the "Data attribution" popover.
     // Required by each source's license (ODbL, CC BY-NC-SA, NASA FIRMS, etc.);
     // strings are verbatim from DATA_SOURCES.md. Static + always-present in the
@@ -161,6 +178,13 @@ async function init() {
         onlyUsingWithGoogleGeocoder: true,
       });
       viewer.scene.primitives.add(tileset);
+      // Higher-fidelity street-level tiles — default SSE is 16
+      tileset.maximumScreenSpaceError = 8;
+      // Pre-load tiles ahead of camera movement for smoother flight
+      tileset.preloadFlightDestinations = true;
+      tileset.preloadAncestors = true;
+      // Larger tile cache for smoother streaming (128 MB)
+      tileset.cacheBytes = 128 * 1024 * 1024;
       // NOTE: Cesium World Terrain intentionally disabled — conflicts with Google 3D Tiles at high zoom.
       // Google Photorealistic 3D Tiles provide their own terrain/elevation.
       viewer.scene.globe.show = false;
@@ -221,6 +245,8 @@ async function init() {
     dataManager.register(radioLayer);
     dataManager.register(bikeshareLayer);
     dataManager.register(aisLiveVesselsLayer);
+    dataManager.register(noaaAlertsLayer);
+    dataManager.register(aviationSigmetsLayer);
     dataManager.register(militaryInstallationsLayer);
     dataManager.register(militaryAwarenessLayer);
     militaryAwarenessLayer.attachDataManager(dataManager);
@@ -323,8 +349,35 @@ async function init() {
       cockpitCloudEffects,
       getRenderGovernorDiagnostics,
       requestRender: governorRequestRender,
+      getVoiceContext() {
+        try {
+          const cart = viewer.camera.positionCartographic;
+          const ctxState = typeof styleManager.getContextModeState === 'function'
+            ? styleManager.getContextModeState() : null;
+          const cockpitState = typeof styleManager.getCockpitState === 'function'
+            ? styleManager.getCockpitState() : null;
+          // Translate internal mode id to the vocabulary the LLM schema uses
+          const RAW_TO_VOCAB = { flights: 'contacts', 'space-missions': 'space-missions' };
+          const rawMode = ctxState?.mode || null;
+          const enabledLayers = dataManager.getAll()
+            .filter((l) => l.enabled && l.showInTogglePanel !== false)
+            .map((l) => l.id);
+          return {
+            latitude: Math.round(Cesium.Math.toDegrees(cart.latitude) * 1000) / 1000,
+            longitude: Math.round(Cesium.Math.toDegrees(cart.longitude) * 1000) / 1000,
+            altitudeM: Math.round(cart.height),
+            style: styleManager.activeStyle || 'normal',
+            mapStack: mapStackController.getActiveId(),
+            contextMode: RAW_TO_VOCAB[rawMode] || rawMode || 'off',
+            cockpitActive: cockpitState?.active || false,
+            enabledLayers,
+          };
+        } catch {
+          return {};
+        }
+      },
     };
-    window.__godsEyeView.voiceCommands = initGevVoiceCommands({ viewer, styleManager, dataManager, sceneDirector, annotations });
+    window.__godsEyeView.voiceCommands = await initGevVoiceCommands({ viewer, styleManager, dataManager, sceneDirector, annotations });
 
   } catch (error) {
     console.error("God's Eye View initialization failed:", error);

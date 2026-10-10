@@ -178,11 +178,10 @@ function geocodePayload({ lat, lon, types, label }) {
   };
 }
 
-function installGoogleMocks(t, handler) {
+function installGeocodeMocks(t, handler) {
   const originalWindow = globalThis.window;
   const originalFetch = globalThis.fetch;
   globalThis.window = {
-    __GOOGLE_MAPS_API_KEY__: 'unit-test-key',
     setTimeout: globalThis.setTimeout,
     clearTimeout: globalThis.clearTimeout,
   };
@@ -196,9 +195,9 @@ function installGoogleMocks(t, handler) {
 
 test('ask-side admin bypass: "the Texas Capitol" recovers near-view despite a far state-typed geocode', async (t) => {
   const calls = [];
-  installGoogleMocks(t, async (url) => {
+  installGeocodeMocks(t, async (url) => {
     calls.push(String(url));
-    if (String(url).startsWith('https://maps.googleapis.com/')) {
+    if (String(url).startsWith('/api/geocode?')) {
       return { json: async () => geocodePayload({
         lat: 31.0000,
         lon: -99.0000,
@@ -231,9 +230,10 @@ test('ask-side admin bypass: "the Texas Capitol" recovers near-view despite a fa
 
 test('ask-side admin bypass: explicit "state of Texas" skips recovery and proximity gating', async (t) => {
   const calls = [];
-  installGoogleMocks(t, async (url) => {
+  installGeocodeMocks(t, async (url) => {
     calls.push(String(url));
-    assert.match(String(url), /^https:\/\/maps\.googleapis\.com\/maps\/api\/geocode/);
+    assert.match(String(url), /^\/api\/geocode\?q=/);
+    assert.doesNotMatch(String(url), /[?&]key=/, 'the API key stays server-side');
     return { json: async () => geocodePayload({
       lat: 31.0000,
       lon: -99.0000,
@@ -269,9 +269,9 @@ for (const fixture of [
 ]) {
   test(`ask-side admin bypass: trailing name "${fixture.target}" remains guarded`, async (t) => {
     const calls = [];
-    installGoogleMocks(t, async (url) => {
+    installGeocodeMocks(t, async (url) => {
       calls.push(String(url));
-      if (String(url).startsWith('https://maps.googleapis.com/')) {
+      if (String(url).startsWith('/api/geocode?')) {
         return { json: async () => geocodePayload({
           lat: fixture.lat,
           lon: fixture.lon,
@@ -295,9 +295,9 @@ for (const fixture of [
 
 test('ask-side admin bypass: bare "Texas" remains on the guarded recovery path', async (t) => {
   const calls = [];
-  installGoogleMocks(t, async (url) => {
+  installGeocodeMocks(t, async (url) => {
     calls.push(String(url));
-    if (String(url).startsWith('https://maps.googleapis.com/')) {
+    if (String(url).startsWith('/api/geocode?')) {
       return { json: async () => geocodePayload({
         lat: 31.0000,
         lon: -99.0000,
@@ -324,9 +324,9 @@ test('ask-side admin bypass: admin level 2/3 result types never grant a township
     ['FB-3 township level 3 fixture', ['administrative_area_level_3', 'locality', 'political']],
   ]);
   const calls = [];
-  installGoogleMocks(t, async (url) => {
+  installGeocodeMocks(t, async (url) => {
     calls.push(String(url));
-    if (String(url).startsWith('https://maps.googleapis.com/')) {
+    if (String(url).startsWith('/api/geocode?')) {
       const query = new URL(String(url)).searchParams.get('address');
       return { json: async () => geocodePayload({
         lat: 39.7817,

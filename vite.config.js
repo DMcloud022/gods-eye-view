@@ -423,6 +423,18 @@ function makeRateLimiter({ windowMs, max, globalMax }) {
 const _overpassRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 90, globalMax: 300 });
 const _militaryInstallationsRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 90, globalMax: 300 });
 const _routeRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 60, globalMax: 200 });
+// Free-tier LLM voice calls. Always-on (not opt-in) because the endpoint
+// has real cost and no other per-IP guard.
+const _webVoiceRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 20, globalMax: 200 });
+// Unauthenticated debug-log writes. Always-on to prevent disk-fill attacks.
+const _debugLogRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 60, globalMax: 300 });
+const _geocodeRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 60, globalMax: 300 });
+// CCTV frame/media routes hit Street View Static API (paid). Always-on.
+const _cctvRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 20, globalMax: 100 });
+// Aircraft track endpoints. OpenSky costs 4 credits/call; adsb.lol is free but polite-use.
+const _trackRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 30, globalMax: 150 });
+// Upstream provider proxies with caches (adsbdb 24h, GBFS 30s).
+const _enrichmentRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 30, globalMax: 100 });
 
 /**
  * Opt-in per-IP rate limiter for the cost-bearing API proxies (OpenAI / Google).
@@ -741,7 +753,7 @@ export function coalesceProxyRequest(inFlight, key, create) {
 const RADIO_DIRECTORY_CACHE_MS = 45 * 60 * 1000;
 const RADIO_DIRECTORY_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 const RADIO_MIRROR_CACHE_MS = 6 * 60 * 60 * 1000;
-const RADIO_FETCH_TIMEOUT_MS = 12_000;
+const RADIO_FETCH_TIMEOUT_MS = 20_000;
 const RADIO_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 const RADIO_DIRECTORY_LIMIT = 750;
 const RADIO_CATALOG_MIN_SUCCESSFUL_QUERIES = 5;
@@ -1072,7 +1084,7 @@ export function createRadioProxyMiddleware({ fetchImpl = null, lookupImpl = look
         hidebroken: 'true',
         order: 'clickcount',
         reverse: 'true',
-        limit: index === 0 ? '1800' : '220',
+        limit: index === 0 ? '500' : '220',
       });
       if (tag) params.set('tag', tag);
       try {
@@ -1327,6 +1339,9 @@ const OPENAI_HUD_SUMMARY_MODEL_DEFAULT = 'gpt-5-nano';
 const REALTIME_DEBUG_LOG_DIR = path.join(__dirname, '.gev-logs');
 const REALTIME_DEBUG_LOG_FILE = path.join(REALTIME_DEBUG_LOG_DIR, 'realtime-conversations.jsonl');
 const REALTIME_DEBUG_LOG_MAX_BYTES = 8 * 1024 * 1024;
+// Hard cap on total log file size. Writes are silently dropped once reached
+// to prevent a disk-fill attack from an unauthenticated debug-log caller.
+const REALTIME_DEBUG_LOG_FILE_MAX_BYTES = 50 * 1024 * 1024;
 
 /**
  * @type {ReturnType<typeof createAisStreamAdapter>|null}
@@ -1537,62 +1552,69 @@ function celestrakProxy() {
     return { at: Date.now(), body };
   }
 
-  return {
-    name: 'celestrak-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/celestrak', async (req, res) => {
-        const group = String(req.url || '').replace(/^\//, '').split('?')[0];
-        if (!/^[a-z0-9-]+$/i.test(group)) {
-          res.writeHead(400, { 'Content-Type': 'text/plain' });
-          res.end('invalid group');
+  function install(middlewares) {
+    middlewares.use('/api/celestrak', async (req, res) => {
+      const send = (status, body, cacheStatus) => {
+        // Guard against a double-send (e.g. a throw AFTER a response already
+        // went out routing into the catch's send): writeHead after headersSent
+        // throws "Cannot set headers after they are sent".
+        if (res.headersSent) return;
+        res.writeHead(status, { 'Content-Type': 'text/plain', 'x-tle-cache': cacheStatus });
+        res.end(body);
+      };
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'GET' });
+        res.end('Method not allowed');
+        return;
+      }
+      const group = String(req.url || '').replace(/^\//, '').split('?')[0];
+      if (!/^[a-z0-9-]+$/i.test(group)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('invalid group');
+        return;
+      }
+      try {
+        const now = Date.now();
+        let entry = mem.get(group);
+        if (!entry) {
+          entry = await readDisk(group);
+          if (entry) mem.set(group, entry);
+        }
+        if (entry && now - entry.at < TLE_TTL_MS) {
+          send(200, entry.body, 'HIT');
           return;
         }
-        const send = (status, body, cacheStatus) => {
-          // Guard against a double-send (e.g. a throw AFTER a response already
-          // went out routing into the catch's send): writeHead after headersSent
-          // throws "Cannot set headers after they are sent".
-          if (res.headersSent) return;
-          res.writeHead(status, { 'Content-Type': 'text/plain', 'x-tle-cache': cacheStatus });
-          res.end(body);
-        };
-        try {
-          const now = Date.now();
-          let entry = mem.get(group);
-          if (!entry) {
-            entry = await readDisk(group);
-            if (entry) mem.set(group, entry);
-          }
-          if (entry && now - entry.at < TLE_TTL_MS) {
-            send(200, entry.body, 'HIT');
-            return;
-          }
-          // Stale or missing → refresh, single-flight per group.
-          if (!inflight.has(group)) {
-            inflight.set(group, fetchUpstream(group)
-              .then(async (fresh) => {
-                mem.set(group, fresh);
-                await writeDisk(group, fresh);
-                return fresh;
-              })
-              .catch((err) => {
-                console.warn(`[celestrak-proxy] ${group} refresh failed (${err?.message || err}) — serving cache if any`);
-                return null;
-              })
-              .finally(() => inflight.delete(group)));
-          }
-          const fresh = await inflight.get(group);
-          if (fresh) {
-            send(200, fresh.body, 'MISS');
-          } else if (entry) {
-            send(200, entry.body, 'STALE-ERROR'); // upstream down — stale beats empty
-          } else {
-            send(502, 'celestrak fetch failed and no cache available', 'NONE');
-          }
-        } catch (err) {
-          send(500, `celestrak proxy error: ${err?.message || err}`, 'ERROR');
+        // Stale or missing → refresh, single-flight per group.
+        if (!inflight.has(group)) {
+          inflight.set(group, fetchUpstream(group)
+            .then(async (fresh) => {
+              mem.set(group, fresh);
+              await writeDisk(group, fresh);
+              return fresh;
+            })
+            .catch((err) => {
+              console.warn(`[celestrak-proxy] ${group} refresh failed (${err?.message || err}) — serving cache if any`);
+              return null;
+            })
+            .finally(() => inflight.delete(group)));
         }
-      });
-    },
+        const fresh = await inflight.get(group);
+        if (fresh) {
+          send(200, fresh.body, 'MISS');
+        } else if (entry) {
+          send(200, entry.body, 'STALE-ERROR'); // upstream down — stale beats empty
+        } else {
+          send(502, 'celestrak fetch failed and no cache available', 'NONE');
+        }
+      } catch (err) {
+        send(500, 'celestrak proxy error', 'ERROR');
+      }
+    });
+  }
+  return {
+    name: 'celestrak-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -1841,34 +1863,37 @@ function tomtomProxy() {
     return buf;
   }
 
-  return {
-    name: 'tomtom-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/tomtom', async (req, res) => {
-        // Sanitized responses only (proxy/security baseline): no upstream
-        // error details, and never echo the key or the upstream URL.
-        const sendJson = (status, obj, extraHeaders = {}) => {
-          if (res.headersSent) return;
-          res.writeHead(status, {
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-store',
-            ...extraHeaders,
-          });
-          res.end(JSON.stringify(obj));
-        };
-        const sendTile = (buf, cacheStatus) => {
-          if (res.headersSent) return;
-          res.writeHead(200, {
-            'Content-Type': 'application/x-protobuf',
-            'Cache-Control': 'no-store',
-            'x-tomtom-cache': cacheStatus,
-          });
-          res.end(buf);
-        };
+  function install(middlewares) {
+    middlewares.use('/api/tomtom', async (req, res) => {
+      // Sanitized responses only (proxy/security baseline): no upstream
+      // error details, and never echo the key or the upstream URL.
+      const sendJson = (status, obj, extraHeaders = {}) => {
+        if (res.headersSent) return;
+        res.writeHead(status, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...extraHeaders,
+        });
+        res.end(JSON.stringify(obj));
+      };
+      const sendTile = (buf, cacheStatus) => {
+        if (res.headersSent) return;
+        res.writeHead(200, {
+          'Content-Type': 'application/x-protobuf',
+          'Cache-Control': 'no-store',
+          'x-tomtom-cache': cacheStatus,
+        });
+        res.end(buf);
+      };
 
-        try {
-          await loadBudgetOnce();
-          const urlPath = String(req.url || '').split('?')[0];
+      if (req.method !== 'GET') {
+        sendJson(405, { error: 'Method not allowed' }, { Allow: 'GET' });
+        return;
+      }
+
+      try {
+        await loadBudgetOnce();
+        const urlPath = String(req.url || '').split('?')[0];
 
           if (urlPath === '/status') {
             const hasKey = Boolean(process.env.TOMTOM_API_KEY);
@@ -1941,12 +1966,16 @@ function tomtomProxy() {
           } else {
             sendJson(502, { error: 'upstream' });
           }
-        } catch (err) {
-          console.warn('[tomtom-proxy] error:', err?.message || err);
-          sendJson(500, { error: 'proxy' });
-        }
-      });
-    },
+      } catch (err) {
+        console.warn('[tomtom-proxy] error:', err?.message || err);
+        sendJson(500, { error: 'proxy' });
+      }
+    });
+  }
+  return {
+    name: 'tomtom-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -2095,15 +2124,61 @@ function firmsProxy() {
     return statusInflight;
   }
 
-  return {
-    name: 'firms-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/firms', async (req, res) => {
+  /**
+   * Fetch active wildfire events from NASA EONET — free, no API key required.
+   * Returns data in the same {at, sources, fires} shape as FIRMS so the rest of
+   * the proxy (buildPayload, disk cache, etc.) works unchanged.
+   * EONET trade-offs: event-level granularity (one point per event, not per
+   * satellite pixel), no FRP or per-pixel confidence. Used only when FIRMS_MAP_KEY
+   * is absent; prefer FIRMS when available for higher-resolution detections.
+   */
+  async function fetchEonetFires() {
+    const url = 'https://eonet.gsfc.nasa.gov/api/v3/events?category=wildfires&days=2&status=open';
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`EONET HTTP ${res.status}`);
+    const { tooLarge, text: body } = await readCappedResponseText(res, 512 * 1024);
+    if (tooLarge) throw new Error('EONET response too large');
+    const data = JSON.parse(body);
+    const now = Date.now();
+    const fires = [];
+    for (const event of (data?.events || [])) {
+      for (const geom of (event?.geometry || [])) {
+        if (geom?.type !== 'Point') continue;
+        const [lon, lat] = geom.coordinates || [];
+        if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) continue;
+        const acqMs = geom.date ? new Date(geom.date).getTime() : now;
+        const d = new Date(Number.isFinite(acqMs) ? acqMs : now);
+        const acqDate = d.toISOString().slice(0, 10);
+        const acqTime = `${String(d.getUTCHours()).padStart(2, '0')}${String(d.getUTCMinutes()).padStart(2, '0')}`;
+        fires.push({
+          lat: Number(lat),
+          lon: Number(lon),
+          confidence: 'nominal',
+          frp: 0,
+          brightness: 0,
+          daynight: 'D',
+          acqDate,
+          acqTime,
+          instrument: 'EONET',
+          satellite: 'EONET',
+          source: 'EONET_WILDFIRE',
+        });
+      }
+    }
+    return { at: now, sources: [{ source: 'EONET_WILDFIRE', count: fires.length, ok: true }], fires };
+  }
+
+  function install(middlewares) {
+    middlewares.use('/api/firms', async (req, res) => {
         const sendJson = (status, obj) => {
           if (res.headersSent) return;
           res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
           res.end(JSON.stringify(obj));
         };
+        if (req.method !== 'GET') {
+          sendJson(405, { error: 'Method not allowed' });
+          return;
+        }
         try {
           const subPath = String(req.url || '').split('?')[0];
           const key = mapKey();
@@ -2111,7 +2186,16 @@ function firmsProxy() {
 
           if (subPath === '/status') {
             if (!key) {
-              sendJson(200, { hasKey: false, lastFetch: null, count: null, stale: false, ttlMs: TTL_MS, transactions: null });
+              // No FIRMS key — report EONET as the active source.
+              sendJson(200, {
+                hasKey: false,
+                source: 'eonet',
+                lastFetch: mem?.at ?? null,
+                count: mem?.fires?.length ?? null,
+                stale: mem ? Date.now() - mem.at >= TTL_MS : false,
+                ttlMs: TTL_MS,
+                transactions: null,
+              });
               return;
             }
             const transactions = await getTransactions(key);
@@ -2127,7 +2211,31 @@ function firmsProxy() {
           }
 
           if (!key) {
-            sendJson(503, { error: 'no_key' });
+            // No FIRMS key — use NASA EONET as a free, keyless wildfire fallback.
+            // Provides active wildfire event coordinates without requiring any key.
+            // (Original: sendJson(503, { error: 'no_key' }) — restore to disable EONET fallback)
+            const eonetEntry = mem;
+            if (eonetEntry && Date.now() - eonetEntry.at < TTL_MS) {
+              sendJson(200, buildPayload(eonetEntry, false));
+              return;
+            }
+            if (!inflight) {
+              inflight = fetchEonetFires()
+                .then(async (fresh) => { mem = fresh; return fresh; })
+                .catch((err) => {
+                  console.warn(`[firms-proxy] EONET fallback failed (${err?.message || err}) — serving cache if any`);
+                  return null;
+                })
+                .finally(() => { inflight = null; });
+            }
+            const eonetFresh = await inflight;
+            if (eonetFresh) {
+              sendJson(200, buildPayload(eonetFresh, false));
+            } else if (eonetEntry) {
+              sendJson(200, buildPayload(eonetEntry, true));
+            } else {
+              sendJson(503, { error: 'no_key' }); // EONET also unreachable
+            }
             return;
           }
 
@@ -2166,7 +2274,11 @@ function firmsProxy() {
           sendJson(500, { error: 'firms proxy error' });
         }
       });
-    },
+  }
+  return {
+    name: 'firms-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -2276,48 +2388,54 @@ function terrainHeightsProxy() {
     return inflight.get(key);
   }
 
+  function install(middlewares) {
+    middlewares.use('/api/terrain/heights', async (req, res) => {
+      const send = (status, bodyObj) => {
+        if (res.headersSent) return;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(bodyObj));
+      };
+      if (req.method !== 'GET') {
+        send(405, { error: 'Method not allowed' });
+        return;
+      }
+      try {
+        await loadDiskOnce();
+        const parsedUrl = new URL(req.url || '', 'http://internal');
+        const rawPoints = parsedUrl.searchParams.get('points');
+        const points = parseTerrainPoints(rawPoints);
+        if (!points) {
+          send(400, { error: 'invalid points parameter — expected "lon,lat;lon,lat;…" with finite numbers' });
+          return;
+        }
+        if (points.length > MAX_POINTS) {
+          send(400, { error: `too many points (${points.length}); max ${MAX_POINTS} per request` });
+          return;
+        }
+
+        const outcome = await resolveTerrainHeightRequest({
+          points,
+          cache: mem,
+          fetchMissing: fetchMissingSingleFlight,
+          ttlMs: TTL_MS,
+        });
+        if (outcome.cacheChanged) diskDirty = true;
+        if (outcome.upstreamError) {
+          console.warn(
+            `[terrain-heights-proxy] refresh incomplete (${outcome.upstreamError?.message || outcome.upstreamError})`
+            + ' — serving stale points when available'
+          );
+        }
+        send(outcome.status, outcome.body);
+      } catch (err) {
+        send(500, { error: 'Service temporarily unavailable' });
+      }
+    });
+  }
   return {
     name: 'terrain-heights-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/terrain/heights', async (req, res) => {
-        const send = (status, bodyObj) => {
-          if (res.headersSent) return;
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(bodyObj));
-        };
-        try {
-          await loadDiskOnce();
-          const parsedUrl = new URL(req.url || '', 'http://internal');
-          const rawPoints = parsedUrl.searchParams.get('points');
-          const points = parseTerrainPoints(rawPoints);
-          if (!points) {
-            send(400, { error: 'invalid points parameter — expected "lon,lat;lon,lat;…" with finite numbers' });
-            return;
-          }
-          if (points.length > MAX_POINTS) {
-            send(500, { error: `too many points (${points.length}); max ${MAX_POINTS} per request` });
-            return;
-          }
-
-          const outcome = await resolveTerrainHeightRequest({
-            points,
-            cache: mem,
-            fetchMissing: fetchMissingSingleFlight,
-            ttlMs: TTL_MS,
-          });
-          if (outcome.cacheChanged) diskDirty = true;
-          if (outcome.upstreamError) {
-            console.warn(
-              `[terrain-heights-proxy] refresh incomplete (${outcome.upstreamError?.message || outcome.upstreamError})`
-              + ' — serving stale points when available'
-            );
-          }
-          send(outcome.status, outcome.body);
-        } catch (err) {
-          send(500, { error: `terrain heights proxy error: ${err?.message || err}` });
-        }
-      });
-    },
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -2410,35 +2528,46 @@ function adsbdbProxy() {
     return inflight.get(ik);
   }
 
+  function install(middlewares) {
+    middlewares.use('/api/adsbdb', async (req, res) => {
+      const send = (status, obj) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(obj));
+      };
+      if (req.method !== 'GET') {
+        send(405, { error: 'Method not allowed' });
+        return;
+      }
+      if (!_enrichmentRateLimiter(clientKey(req))) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '5' });
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
+      await loadOnce();
+      try {
+        const [, kind, rawKey] = String(req.url || '').split('?')[0].split('/');
+        if (kind === 'route') {
+          const cs = String(rawKey || '').toUpperCase();
+          if (!/^[A-Z0-9]{2,8}$/.test(cs)) return send(400, { error: 'invalid callsign' });
+          const data = await lookup('route', cs);
+          return send(200, data ? { found: true, ...data } : { found: false });
+        }
+        if (kind === 'type') {
+          const hex = String(rawKey || '').toLowerCase();
+          if (!/^[0-9a-f]{6}$/.test(hex)) return send(400, { error: 'invalid hex' });
+          const data = await lookup('aircraft', hex);
+          return send(200, data ? { found: true, ...data } : { found: false });
+        }
+        return send(404, { error: 'unknown endpoint' });
+      } catch {
+        return send(500, { error: 'Enrichment service unavailable' });
+      }
+    });
+  }
   return {
     name: 'adsbdb-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/adsbdb', async (req, res) => {
-        await loadOnce();
-        const send = (status, obj) => {
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(obj));
-        };
-        try {
-          const [, kind, rawKey] = String(req.url || '').split('?')[0].split('/');
-          if (kind === 'route') {
-            const cs = String(rawKey || '').toUpperCase();
-            if (!/^[A-Z0-9]{2,8}$/.test(cs)) return send(400, { error: 'invalid callsign' });
-            const data = await lookup('route', cs);
-            return send(200, data ? { found: true, ...data } : { found: false });
-          }
-          if (kind === 'type') {
-            const hex = String(rawKey || '').toLowerCase();
-            if (!/^[0-9a-f]{6}$/.test(hex)) return send(400, { error: 'invalid hex' });
-            const data = await lookup('aircraft', hex);
-            return send(200, data ? { found: true, ...data } : { found: false });
-          }
-          return send(404, { error: 'unknown endpoint' });
-        } catch (err) {
-          return send(500, { error: String(err?.message || err) });
-        }
-      });
-    },
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -2583,10 +2712,8 @@ async function fetchOverpassPayload(body, maxResponseBytes = OVERPASS_MAX_RESPON
  * @returns {import('vite').Plugin}
  */
 function overpassProxy() {
-  return {
-    name: 'overpass-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/overpass', async (req, res) => {
+  function install(middlewares) {
+    middlewares.use('/api/overpass', async (req, res) => {
         // Hoisted out of the try so the catch's serve-stale lookup can see it
         // (a body-read failure would otherwise hit an out-of-scope reference).
         let cacheKey = null;
@@ -2703,7 +2830,12 @@ function overpassProxy() {
 
       // Real OSM routing via the public FOSSGIS OSRM servers (foot/car/bike).
       // GET /api/route?profile=foot|car|bike&coords=lon,lat;lon,lat[;...]
-      server.middlewares.use('/api/route', async (req, res) => {
+      middlewares.use('/api/route', async (req, res) => {
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET' });
+          res.end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
+          return;
+        }
         const fail = (msg) => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: msg }));
@@ -2753,7 +2885,7 @@ function overpassProxy() {
           const now = Date.now();
           const cached = _routeCache.get(cacheKey);
           if (cached && now - cached.cachedAt <= ROUTE_CACHE_MS) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, max-age=600' });
             res.end(JSON.stringify(cached.payload));
             return;
           }
@@ -2792,7 +2924,11 @@ function overpassProxy() {
           fail('route proxy error');
         }
       });
-    },
+  }
+  return {
+    name: 'overpass-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -2908,12 +3044,15 @@ function openSkySourceIsStale(sourceEpochMs, now = Date.now()) {
  * @returns {import('vite').Plugin}
  */
 function openSkyProxy() {
-  return {
-    name: 'opensky-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/opensky', async (req, res) => {
-        try {
-          const requestedMode = normalizeOpenSkyAuthMode(process.env.OPENSKY_AUTH_MODE);
+  function install(middlewares) {
+    middlewares.use('/api/opensky', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET' });
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+      try {
+        const requestedMode = normalizeOpenSkyAuthMode(process.env.OPENSKY_AUTH_MODE);
           const now = Date.now();
           const inCooldown = now < _openskyCooldownUntil;
           // Fresh-enough cache (adaptive TTL) OR any cache during a 429
@@ -3187,7 +3326,11 @@ function openSkyProxy() {
           res.end(JSON.stringify({ error: 'OpenSky proxy error' }));
         }
       });
-    },
+  }
+  return {
+    name: 'opensky-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -3243,16 +3386,19 @@ function gbfsCacheControl(pathname) {
  * @returns {import('vite').Plugin}
  */
 function gbfsProxy() {
-  return {
-    name: 'gbfs-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/gbfs', async (req, res) => {
-        try {
-          if (req.method !== 'GET') {
-            res.writeHead(405, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-            res.end(JSON.stringify({ error: 'Method Not Allowed' }));
-            return;
-          }
+  function install(middlewares) {
+    middlewares.use('/api/gbfs', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Allow: 'GET' });
+        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        return;
+      }
+      if (!_enrichmentRateLimiter(clientKey(req))) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Retry-After': '5' });
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
+      try {
 
           const url = new URL(req.url || '/', 'http://localhost');
           const encodedTarget = url.pathname.replace(/^\/+/, '');
@@ -3347,7 +3493,11 @@ function gbfsProxy() {
           res.end(JSON.stringify({ error: 'GBFS proxy error' }));
         }
       });
-    },
+  }
+  return {
+    name: 'gbfs-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -4488,10 +4638,18 @@ function cctvProxy() {
     }
   };
 
-  return {
-    name: 'cctv-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/cctv', async (req, res) => {
+  function install(middlewares) {
+    middlewares.use('/api/cctv', async (req, res) => {
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET' });
+          res.end(JSON.stringify({ error: 'Method not allowed' }));
+          return;
+        }
+        if (!_cctvRateLimiter(clientKey(req))) {
+          res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '5' });
+          res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+          return;
+        }
         try {
           const sources = await getCctvSources();
           const sourceById = new Map(sources.map((source) => [source.id, source]));
@@ -4564,6 +4722,7 @@ function cctvProxy() {
               if (requestRange) upstreamHeaders.Range = requestRange;
               const upstream = await fetch(mediaUrl, {
                 headers: upstreamHeaders,
+                signal: AbortSignal.timeout(CCTV_FRAME_FETCH_TIMEOUT_MS),
               });
               const contentType = upstream.headers.get('content-type') || '';
               if (!upstream.ok) {
@@ -4693,7 +4852,11 @@ function cctvProxy() {
           res.end(JSON.stringify({ error: 'CCTV proxy error' }));
         }
       });
-    },
+  }
+  return {
+    name: 'cctv-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -4712,10 +4875,18 @@ function adsbLolProxy() {
   let _cacheAt = 0;
   /** Response cache TTL (ms). */
   const CACHE_MS = 12000;
-  return {
-    name: 'adsblol-proxy',
-    configureServer(server) {
-      server.middlewares.use('/api/adsblol/mil', async (req, res) => {
+  function install(middlewares) {
+    middlewares.use('/api/adsblol/mil', async (req, res) => {
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET' });
+          res.end(JSON.stringify({ error: 'Method not allowed' }));
+          return;
+        }
+        if (!_militaryInstallationsRateLimiter(clientKey(req))) {
+          res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '5' });
+          res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+          return;
+        }
         try {
           const now = Date.now();
           if (_cache && now - _cacheAt < CACHE_MS) {
@@ -4725,8 +4896,14 @@ function adsbLolProxy() {
           }
           const upstream = await fetch('https://api.adsb.lol/v2/mil', {
             headers: { 'User-Agent': 'gods-eye-view-adsblol-proxy/1.0' },
+            signal: AbortSignal.timeout(10_000),
           });
-          const body = await upstream.text();
+          const { tooLarge, text: body } = await readCappedResponseText(upstream, 4 * 1024 * 1024);
+          if (tooLarge) {
+            res.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+            res.end(JSON.stringify({ error: 'ADS-B response too large' }));
+            return;
+          }
           if (upstream.ok) {
             _cache = body;
             _cacheAt = now;
@@ -4744,7 +4921,11 @@ function adsbLolProxy() {
           res.end(JSON.stringify({ error: 'ADS-B proxy error' }));
         }
       });
-    },
+  }
+  return {
+    name: 'adsblol-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
   };
 }
 
@@ -4758,6 +4939,13 @@ function adsbLolProxy() {
 function aisLiveProxy() {
   function install(middlewares) {
     middlewares.use('/api/ais-live', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Allow', 'GET');
+        res.end(JSON.stringify({ error: 'Method not allowed', rows: [] }));
+        return;
+      }
       try {
         ensureAisStreamConnection();
         const incoming = new URL(req.url || '', 'http://localhost');
@@ -4811,7 +4999,7 @@ function aisLiveProxy() {
         res.statusCode = 502;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Cache-Control', 'no-store');
-        res.end(JSON.stringify({ error: error?.message || 'AIS live stream error', rows: [] }));
+        res.end(JSON.stringify({ error: 'AIS data temporarily unavailable', rows: [] }));
       }
     });
   }
@@ -4894,6 +5082,20 @@ function trackBackfillProxies() {
 
   function install(middlewares) {
     middlewares.use('/api/opensky-track', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Allow', 'GET');
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+      if (!_trackRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
       try {
         const incoming = new URL(req.url || '', 'http://localhost');
         const icao24 = String(incoming.searchParams.get('icao24') || '').trim().toLowerCase();
@@ -4918,6 +5120,20 @@ function trackBackfillProxies() {
     });
 
     middlewares.use('/api/adsblol/trace', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Allow', 'GET');
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+      if (!_trackRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
       try {
         const incoming = new URL(req.url || '', 'http://localhost');
         const hex = String(incoming.searchParams.get('hex') || '').trim().toLowerCase();
@@ -4967,53 +5183,63 @@ function openAiRealtimeProxy() {
         return;
       }
 
+      // Always-on per-IP cap: each HUD call hits OmniRoute/OpenAI (real cost).
+      if (!_webVoiceRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
       // Opt-in per-IP throttle (GEV_RATELIMIT_OPENAI_PER_MIN). No-op when unset.
       if (!enforceOptInRateLimit(openAiRateLimiter(), req, res)) return;
 
-      const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) {
-        res.statusCode = 503;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'OPENAI_API_KEY is not set' }));
-        return;
-      }
-
+      let context = {};
       try {
         const body = await readRequestBody(req, 64 * 1024);
-        const context = JSON.parse(body || '{}');
-        const response = await fetch('https://api.openai.com/v1/responses', {
+        context = JSON.parse(body || '{}');
+        const omniBase = process.env.OMNI_BASE_URL || 'http://localhost:20128/v1';
+        const omniModel = process.env.OMNI_HUD_MODEL || 'auto/chat';
+        const response = await fetch(`${omniBase}/chat/completions`, {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: 'Bearer omniroute-no-auth',
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: process.env.OPENAI_HUD_SUMMARY_MODEL || OPENAI_HUD_SUMMARY_MODEL_DEFAULT,
-            instructions: [
-              "Write one concise intelligence-HUD summary for God's Eye View.",
-              'Use only the supplied place, street, nearby-place, and enabled-layer text labels.',
-              'Prefer the clearest named place and include a relevant enabled layer only when useful.',
-              'Do not infer from coordinates or invent a place.',
-              'Output exactly five words with no title, punctuation, markdown, or introductory phrase.',
-            ].join(' '),
-            input: JSON.stringify(context),
-            reasoning: { effort: 'minimal' },
-            max_output_tokens: 100,
+            model: omniModel,
+            stream: false,
+            messages: [
+              {
+                role: 'system',
+                content: [
+                  "Write one concise intelligence-HUD summary for God's Eye View.",
+                  'Use only the supplied place, street, nearby-place, and enabled-layer text labels.',
+                  'Prefer the clearest named place and include a relevant enabled layer only when useful.',
+                  'Do not infer from coordinates or invent a place.',
+                  'Output exactly five words with no title, punctuation, markdown, or introductory phrase.',
+                ].join(' '),
+              },
+              { role: 'user', content: JSON.stringify(context) },
+            ],
+            max_tokens: 30,
+            temperature: 0,
           }),
+          signal: AbortSignal.timeout(15000),
         });
         const data = await response.json().catch(() => ({}));
-        const summary = toFiveWordHudSummary(extractOpenAiResponseText(data));
-        res.statusCode = response.ok && summary ? 200 : response.status || 502;
+        const text = data.choices?.[0]?.message?.content || '';
+        const aiSummary = toFiveWordHudSummary(text);
+        const summary = aiSummary || deterministicHudSummary(context);
+        res.statusCode = summary ? 200 : 204;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Cache-Control', 'no-store');
-        res.end(JSON.stringify({
-          summary: summary || null,
-          error: response.ok ? null : data.error?.message || 'OpenAI HUD summary request failed',
-        }));
+        res.end(JSON.stringify({ summary: summary || null, error: null }));
       } catch (error) {
-        res.statusCode = 502;
+        const fallback = deterministicHudSummary(context);
+        res.statusCode = fallback ? 200 : 502;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: error?.message || 'OpenAI HUD summary request failed' }));
+        res.end(JSON.stringify({ summary: fallback || null, error: fallback ? null : 'Summary unavailable' }));
       }
     });
 
@@ -5025,20 +5251,43 @@ function openAiRealtimeProxy() {
         return;
       }
 
+      // Per-IP rate limit: 60 writes/min. Always-on — no auth on this endpoint.
+      if (!_debugLogRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
+
       try {
+        // Check total file size before accepting the write.
+        let existingBytes = 0;
+        try { existingBytes = fs.statSync(REALTIME_DEBUG_LOG_FILE).size; } catch { /* file absent */ }
+        if (existingBytes >= REALTIME_DEBUG_LOG_FILE_MAX_BYTES) {
+          res.statusCode = 507;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'Debug log full' }));
+          return;
+        }
+
         const body = await readRequestBody(req, REALTIME_DEBUG_LOG_MAX_BYTES);
         const record = JSON.parse(body || '{}');
-        fs.mkdirSync(REALTIME_DEBUG_LOG_DIR, { recursive: true });
-        fs.appendFileSync(REALTIME_DEBUG_LOG_FILE, `${JSON.stringify({
+        // Explicit top-level fields prevent arbitrary key injection from overwriting loggedAt.
+        const entry = {
           loggedAt: new Date().toISOString(),
-          ...record,
-        })}\n`);
+          sessionId: record.sessionId,
+          type: record.type,
+          data: record.data,
+        };
+        fs.mkdirSync(REALTIME_DEBUG_LOG_DIR, { recursive: true });
+        fs.appendFileSync(REALTIME_DEBUG_LOG_FILE, `${JSON.stringify(entry)}\n`);
         res.statusCode = 204;
         res.end();
       } catch (error) {
         res.statusCode = 400;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: error?.message || 'Failed to write Realtime debug log' }));
+        res.end(JSON.stringify({ error: 'Failed to write Realtime debug log' }));
       }
     });
 
@@ -5050,6 +5299,14 @@ function openAiRealtimeProxy() {
         return;
       }
 
+      // Always-on per-IP cap: mirrors the voice chat limit (client secret minting is money).
+      if (!_webVoiceRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
       // Opt-in per-IP throttle (GEV_RATELIMIT_OPENAI_PER_MIN). No-op when unset.
       if (!enforceOptInRateLimit(openAiRateLimiter(), req, res)) return;
 
@@ -5139,7 +5396,7 @@ function openAiRealtimeProxy() {
             'When a viewport screenshot is attached after get_entity_context, read clearly legible street, building, and place labels from it and combine them with structured label context. Respect scene viewScale: at global/continental/regional scale, avoid naming a precise street/city from one center pixel.',
             'Do not mention disabled layers or stale selections.',
             'When a request requires a tool call, do not speak in the same response as the tool call. Call the tool first.',
-            'When a single user request contains MULTIPLE changes (e.g. "switch to operator layout, use balanced detection at density 50, and switch to Bing aerial"), call ALL the corresponding tools — multiple tool calls in sequence — before speaking. Never confirm a partial subset. If a later tool fails, say which parts succeeded and which failed.',
+            'When a single user request contains MULTIPLE changes (e.g. "switch to operator layout, use balanced detection at density 50, and switch to dark map"), call ALL the corresponding tools — multiple tool calls in sequence — before speaking. Never confirm a partial subset. If a later tool fails, say which parts succeeded and which failed.',
             'After receiving tool output, speak exactly one short confirmation. Do not repeat the confirmation.',
             'For "show/open/turn on" layer requests, enable the matching layer. For "hide/close/turn off", disable it.',
             // INSTRUCTION-ONLY mapping for the two globe-scale named views.
@@ -5154,16 +5411,16 @@ function openAiRealtimeProxy() {
             // Fully expressible with tools that already exist, so
             // GEV_REALTIME_TOOLS is deliberately untouched — deleting this one
             // string is the whole rollback.
-            'NAMED VIEWS are shorthand for tool calls you already have — there is no "mode" tool for them. Treat ONLY these as the shorthand: "infrastructure mode" / "the infrastructure view" / "show me global infrastructure" means three set_layer_visibility calls (local-datacenters, local-dams, telegeography-submarine-cables) plus zoom_to_globe; "environmental mode" / "earth watch" / "active events", said as the name of a view, means set_layer_visibility for local-firms and earthquakes plus zoom_to_globe. Anything vaguer is NOT this shorthand — an open-ended question about the world or the news is an ordinary question: answer it, or use analyst_query over the layers already on. Never switch a whole view on to answer a question nobody asked to see. When you do run one, make every call before speaking, then give one confirmation naming the resulting state; if the fires layer comes back unavailable because no FIRMS key is configured, say so plainly — the earthquakes still loaded. "Live contacts" and "space missions" are NOT this pattern: they stay set_context_mode{mode:"contacts"} and set_context_mode{mode:"space-missions"}.',
+            'NAMED VIEWS are shorthand for tool calls you already have — there is no "mode" tool for them. Treat ONLY these as the shorthand: "infrastructure mode" / "the infrastructure view" / "show me global infrastructure" means three set_layer_visibility calls (local-datacenters, local-dams, telegeography-submarine-cables) plus zoom_to_globe; "environmental mode" / "earth watch" / "active events", said as the name of a view, means set_layer_visibility for local-firms and earthquakes plus zoom_to_globe; "weather mode" / "show me weather" means set_layer_visibility for noaa-alerts (US warnings) and aviation-sigmets (global hazards) plus zoom_to_globe. Anything vaguer is NOT this shorthand — an open-ended question about the world or the news is an ordinary question: answer it, or use analyst_query over the layers already on. Never switch a whole view on to answer a question nobody asked to see. When you do run one, make every call before speaking, then give one confirmation naming the resulting state; if the fires layer comes back unavailable because no FIRMS key is configured, say so plainly — the earthquakes still loaded. "Live contacts" and "space missions" are NOT this pattern: they stay set_context_mode{mode:"contacts"} and set_context_mode{mode:"space-missions"}.',
             'For visual filter requests, call set_visual_style with one of the allowed style IDs.',
-            'Disambiguation table — basemap vs layer vs style: basemap switching requires an explicit stack name — "Bing aerial" means set_map_stack bing-aerial, "aerial with labels" means bing-labels, "OSM"/"road map" means osm, "Google 3D"/"photorealistic" means photoreal. Any mention of "satellite" or "satellites" ALWAYS means the satellites DATA LAYER via set_layer_visibility, never a basemap. "surveillance"/"night vision"/"thermal" are visual STYLES via set_visual_style.',
+            'Disambiguation table — basemap vs layer vs style: basemap switching requires an explicit phrase — "Google 3D"/"photorealistic" means set_map_stack photoreal, "Esri imagery"/"Esri satellite" means set_map_stack esri-satellite, "satellite imagery" means set_map_stack maptiler-satellite, "hybrid"/"satellite with labels"/"aerial with labels" means set_map_stack maptiler-hybrid, "dark map"/"CARTO dark" means set_map_stack carto-dark, "OSM"/"road map" means set_map_stack osm. Any bare mention of "satellite" or "satellites" ALWAYS means the satellites DATA LAYER via set_layer_visibility, never a basemap. "surveillance"/"night vision"/"thermal" are visual STYLES via set_visual_style.',
             'HUD requests ("hud on/off", "switch to operator/minimal/tactical layout") use set_hud. Detection requests ("detection on", "dense mode", "balanced mode", "sparse mode", "set density to 25", "use weighted allocation") use set_detection. Density snaps to 0/25/50/75/100 and derives Sparse/Balanced/Dense; panoptic is a legacy alias for Dense.',
             'Bloom/sharpen requests use set_post_processing. Scene requests ("play orbital watch", "stop the scene", "what scenes are there") use control_scene. CCTV camera requests ("next camera", "nearest camera", "select the Congress camera", "show coverage") use control_cctv — the CCTV layer must be enabled first.',
             'Radio playback requests use control_radio. "Turn on/start the radio" means action=play; action=enable only reveals Radio markers and must be reserved for explicit "show/enable the Radio layer/markers" requests. After a prepared playback result, briefly confirm any other completed actions and say "Turning on the radio"—never claim it is already playing. The client keeps Radio muted until playback is verified, then closes voice before restoring Radio volume. Examples: "play news near Austin" → select category=news locationId=austin; "play US news" → select category=news country=US; "Radio volume 30" → volume; pause/resume/stop/next/previous use the matching action. Radio selection never moves the camera.',
             '"Track/follow <something specific>" (a callsign, ship name, satellite name) uses track_entity. "Take me to the biggest fire" uses track_entity with query "biggest fire" (the fires layer must be enabled). Bare "orbit" means camera orbit of the current landmark. "Stop following/tracking" uses stop_tracking.',
             '"Show me which planes are overhead"/"frame the ships"/"show me the satellites above" use frame_overhead with the matching target.',
             "After frame_overhead, speak ONLY from the tool result's count field — e.g. 'Framed fourteen aircraft, labels on'; never reassess or second-guess the count aloud.",
-            'Confirmations echo the RESULTING state, never the request: "HUD operator layout", "Density twenty-five percent", "Bing aerial imagery", "Tracking UAL428", "Framed fourteen aircraft". On ok=false, state the failure plainly: "Nothing matched UAL999", "No ships within 120 kilometers". Never claim an action without ok=true in the tool result.',
+            'Confirmations echo the RESULTING state, never the request: "HUD operator layout", "Density twenty-five percent", "Dark map active", "Tracking UAL428", "Framed fourteen aircraft". On ok=false, state the failure plainly: "Nothing matched UAL999", "No ships within 120 kilometers". Never claim an action without ok=true in the tool result.',
             'For destination requests such as "take me to Italy", "go to NYC", or "show me the Eiffel Tower", call fly_to_location. Prefer known city IDs when available; otherwise pass the plain place query.',
             'Navigation-only requests ("take me to X", "go to X", "fly to X") are NOT descriptions: call fly_to_location alone and do NOT also call annotate_map, unless the user explicitly asks to mark the place or you go on to explain specific places there. Never drop a point pin on a region-scale natural feature (a mountain range, desert, sea, or forest) — a single point in the middle of the Rockies is meaningless. If the user explicitly asks to mark such a region, prefer type=area.',
             'For country and city destinations, omit rangeM so GEV frames the whole country or city in view. For landmarks and buildings, omit rangeM so GEV chooses a close landmark view.',
@@ -5205,10 +5462,333 @@ function openAiRealtimeProxy() {
           res.setHeader('X-GEV-Voice-Tier-Fallback', '1');
         }
         res.end(body);
+      } catch {
+        res.statusCode = 502;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Failed to create voice session' }));
+      }
+    });
+
+    // Voice mode probe — tells the client whether to use Realtime or the free
+    // Web Speech + OmniRoute fallback. Never makes external calls.
+    middlewares.use('/api/voice/mode', (req, res) => {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Allow', 'GET');
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+      const hasOpenAiKey = Boolean(process.env.OPENAI_API_KEY);
+      const hasOmniBase = Boolean(process.env.OMNI_BASE_URL) || Boolean(process.env.ANTHROPIC_API_KEY);
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(JSON.stringify({
+        mode: hasOpenAiKey ? 'realtime' : 'web',
+        webVoiceAvailable: hasOmniBase,
+      }));
+    });
+
+    // Free voice chat endpoint — Web Speech STT → OmniRoute LLM → client TTS.
+    // Accepts {transcript, history, context}; returns {reply, tool_calls}.
+    middlewares.use('/api/gev-voice/chat', async (req, res) => {
+      if (req.method !== 'POST') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+      // Always-on per-IP rate limit: 20 voice requests/min (includes fast-path nav commands).
+      if (!_webVoiceRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
+      try {
+        const body = await readRequestBody(req, 128 * 1024);
+        const { transcript: rawTranscript, history = [], context = {} } = JSON.parse(body || '{}');
+        if (!rawTranscript || typeof rawTranscript !== 'string') {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'transcript is required' }));
+          return;
+        }
+        // Cap transcript to prevent token exhaustion via an overlong single message.
+        const transcript = rawTranscript.slice(0, 2000);
+        // Fast-path: simple navigation commands for pre-indexed places bypass the
+        // LLM round-trip entirely. E.g. "go to Manila" → fly_to_location immediately.
+        const navShortcut = resolveNavigationIntent(transcript);
+        if (navShortcut) {
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ reply: '', tool_calls: [navShortcut] }));
+          return;
+        }
+        const omniBase = process.env.OMNI_BASE_URL || 'http://localhost:20128/v1';
+        const tools = GEV_REALTIME_TOOLS.map((t) => ({
+          type: 'function',
+          function: { name: t.name, description: t.description, parameters: t.parameters },
+        }));
+        const systemPrompt = [
+          "You are GEV Voice Control, a concise voice controller for a Cesium 3D globe app called God's Eye View.",
+          'Control the app ONLY by calling the provided tools. Never invent tool names or arguments.',
+          '',
+          'NAVIGATION — call fly_to_location when the user names a place, city, country, landmark, mall, or airport:',
+          '  Always pass the most specific query string you can to fly_to_location.',
+          '',
+          '  Philippine cities & regions:',
+          '  "take me to Manila" → fly_to_location(query="Manila, Philippines")',
+          '  "fly to Cebu" / "Cebu City" → fly_to_location(query="Cebu City, Philippines")',
+          '  "go to Boracay" → fly_to_location(query="Boracay Island, Philippines")',
+          '  "Davao" → fly_to_location(query="Davao City, Philippines")',
+          '  "Quezon City" / "QC" → fly_to_location(query="Quezon City, Philippines")',
+          '  "Makati" → fly_to_location(query="Makati, Metro Manila, Philippines")',
+          '  "BGC" / "Bonifacio Global City" / "The Fort" → fly_to_location(query="Bonifacio Global City, Taguig, Philippines")',
+          '  "Ortigas" → fly_to_location(query="Ortigas Center, Pasig, Philippines")',
+          '  "Zamboanga" → fly_to_location(query="Zamboanga City, Philippines")',
+          '  "CDO" / "Cagayan de Oro" → fly_to_location(query="Cagayan de Oro, Philippines")',
+          '  "GenSan" / "General Santos" → fly_to_location(query="General Santos, South Cotabato, Philippines")',
+          '  "Iloilo" → fly_to_location(query="Iloilo City, Western Visayas, Philippines")',
+          '  "Bacolod" → fly_to_location(query="Bacolod, Negros Occidental, Philippines")',
+          '  "Tacloban" → fly_to_location(query="Tacloban, Leyte, Philippines")',
+          '  "Palawan" / "El Nido" / "Coron" / "Puerto Princesa" → fly_to_location(query="El Nido, Palawan, Philippines")',
+          '  "Siargao" → fly_to_location(query="Siargao Island, Surigao del Norte, Philippines")',
+          '  "Bohol" / "Panglao" → fly_to_location(query="Panglao, Bohol, Philippines")',
+          '  "Tagaytay" → fly_to_location(query="Tagaytay, Cavite, Philippines")',
+          '  "Clark" → fly_to_location(query="Clark Freeport Zone, Pampanga, Philippines")',
+          '  "Subic" / "Subic Bay" → fly_to_location(query="Subic Bay Freeport Zone, Olongapo, Philippines")',
+          '  "Vigan" → fly_to_location(query="Vigan, Ilocos Sur, Philippines")',
+          '  "Baguio" → fly_to_location(query="Baguio, Benguet, Philippines")',
+          '  "Legazpi" → fly_to_location(query="Legazpi, Albay, Philippines")',
+          '  "Naga" → fly_to_location(query="Naga, Camarines Sur, Philippines")',
+          '',
+          '  Philippine districts, landmarks & malls:',
+          '  "Intramuros" → fly_to_location(query="Intramuros, Manila, Philippines")',
+          '  "Rizal Park" / "Luneta" → fly_to_location(query="Rizal Park, Manila, Philippines")',
+          '  "Fort Santiago" → fly_to_location(query="Fort Santiago, Intramuros, Manila, Philippines")',
+          '  "NAIA" / "NAIA Airport" → fly_to_location(query="Ninoy Aquino International Airport, Philippines")',
+          '  "MOA" / "SM Mall of Asia" → fly_to_location(query="SM Mall of Asia, Pasay, Philippines")',
+          '  "Greenbelt" → fly_to_location(query="Greenbelt, Makati, Philippines")',
+          '  "Glorietta" → fly_to_location(query="Glorietta, Makati, Philippines")',
+          '  "Ayala" → fly_to_location(query="Ayala Center, Makati, Philippines")',
+          '  "TriNoma" / "SM North EDSA" → fly_to_location(query="TriNoma Mall, Quezon City, Philippines")',
+          '  "Megamall" → fly_to_location(query="SM Megamall, Mandaluyong, Philippines")',
+          '  "Rockwell" → fly_to_location(query="Rockwell Center, Makati, Philippines")',
+          '  "Divisoria" → fly_to_location(query="Divisoria, Manila, Philippines")',
+          '  "Binondo" / "Chinatown Manila" → fly_to_location(query="Binondo, Manila, Philippines")',
+          '  "EDSA" → fly_to_location(query="EDSA, Metro Manila, Philippines")',
+          '',
+          '  International:',
+          '  "Tokyo" → fly_to_location(query="Tokyo, Japan")',
+          '  "New York" → fly_to_location(query="New York City, USA")',
+          '  "Singapore" → fly_to_location(query="Singapore")',
+          '',
+          '  Filipino-language navigation commands (translate and execute):',
+          '  "pumunta sa Manila" / "punta Manila" → fly_to_location(query="Manila, Philippines")',
+          '  "ipakita ang Cebu" → fly_to_location(query="Cebu City, Philippines")',
+          '  "dalhin ako sa BGC" → fly_to_location(query="Bonifacio Global City, Taguig, Philippines")',
+          '',
+          'LAYERS — call set_layer_visibility when the user says show/hide/enable/disable/toggle + a layer type:',
+          '  "show earthquakes" → set_layer_visibility(layerId="earthquakes", enabled=true)',
+          '  "hide flights" → set_layer_visibility(layerId="flights", enabled=false)',
+          '  "enable satellites" → set_layer_visibility(layerId="satellites", enabled=true)',
+          '  "turn on military" → set_layer_visibility(layerId="military", enabled=true)',
+          '  "show military bases" / "installations" → set_layer_visibility(layerId="military-installations", enabled=true)',
+          '  "military awareness" / "restricted airspace" → set_layer_visibility(layerId="military-awareness", enabled=true)',
+          '  "toggle CCTV" / "show cameras" → set_layer_visibility(layerId="cctv", enabled=true)',
+          '  "show ships" / "vessels" → set_layer_visibility(layerId="ais-live-vessels", enabled=true)',
+          '  "show fires" / "wildfires" → set_layer_visibility(layerId="local-firms", enabled=true)',
+          '  Layer IDs: flights, military, military-installations, military-awareness, earthquakes, satellites, rocket-launches, traffic, cctv, radio, bikeshare, ais-live-vessels, local-firms, local-datacenters, local-dams, telegeography-submarine-cables, noaa-alerts, aviation-sigmets',
+          '',
+          'BASEMAP — call set_map_stack to switch background map imagery (NOT the satellites data layer):',
+          '  "dark map" / "CARTO dark" → set_map_stack(stack="carto-dark")',
+          '  "satellite imagery" / "Esri imagery" → set_map_stack(stack="esri-satellite")',
+          '  "hybrid" / "satellite with labels" → set_map_stack(stack="maptiler-hybrid")',
+          '  "Google 3D" / "photorealistic" → set_map_stack(stack="photoreal")',
+          '  "OSM" / "road map" → set_map_stack(stack="osm")',
+          '  NOTE: "satellite" or "satellites" alone = satellites DATA LAYER, never a basemap.',
+          '',
+          'CAMERA ZOOM — call adjust_camera_zoom for simple zoom requests:',
+          '  "zoom in" / "get closer" / "mas malapit" → adjust_camera_zoom(direction="in")',
+          '  "zoom out" / "mas malayo" → adjust_camera_zoom(direction="out")',
+          '  "globe view" / "see the whole world" / "buong mundo" → zoom_to_globe',
+          '',
+          'CAMERA MOTION — call move_camera for tilt, pan, rotate, orbit:',
+          '  "tilt down" → move_camera(motion="tilt", direction="down")',
+          '  "rotate left" → move_camera(motion="rotate", direction="left")',
+          '  "pan right" → move_camera(motion="pan", direction="right")',
+          '  "orbit slowly" → move_camera(motion="orbit", speed="slow", mode="continuous")',
+          '',
+          'OTHER:',
+          '  "what is here?" / "what do I see?" / "ano ito?" → get_entity_context',
+          '  "track that plane/ship" → track_entity',
+          '  "how many flights over X?" → analyst_query',
+          '  "play a radio station" → control_radio',
+          '  "show a CCTV feed" / "show cameras near me" → control_cctv',
+          '  Drawing requests (pins, areas, routes) → annotate_map',
+          '',
+          'Keep replies short (1-2 sentences). When a tool executes an action, confirm in plain English.',
+          'For ordinary conversation with no app action, reply in plain text without calling tools.',
+          'When the user speaks Filipino/Tagalog, understand the intent and respond in English.',
+        ].join('\n');
+        const contextNote = Object.keys(context).length > 0
+          ? `\n\n[Current map context: ${JSON.stringify(context).slice(0, 800)}]`
+          : '';
+        // Filter history to only user/assistant roles and cap each message length
+        // to prevent prompt injection via a crafted system-role entry.
+        const safeHistory = Array.isArray(history)
+          ? history
+            .filter((m) => m?.role === 'user' || m?.role === 'assistant')
+            .map((m) => ({ role: m.role, content: String(m.content || '').slice(0, 4000) }))
+            .slice(-8)
+          : [];
+        const messages = [
+          { role: 'system', content: systemPrompt },
+          ...safeHistory,
+          { role: 'user', content: transcript + contextNote },
+        ];
+        const omniPayload = JSON.stringify({
+          model: 'auto/chat',
+          stream: false,
+          messages,
+          tools,
+          tool_choice: 'auto',
+          max_tokens: 512,
+          temperature: 0,
+        });
+        const omniHeaders = { Authorization: 'Bearer omniroute-no-auth', 'Content-Type': 'application/json' };
+        let omniRes = await fetch(`${omniBase}/chat/completions`, {
+          method: 'POST', headers: omniHeaders, body: omniPayload,
+          signal: AbortSignal.timeout(30000),
+        });
+        let data = await omniRes.json().catch(() => ({}));
+        // Single retry on transient provider failures (pool rotation or brief outage).
+        if ((data.error || !omniRes.ok) && !(data.error?.code === 'rate_limit_exceeded')) {
+          await new Promise((r) => setTimeout(r, 1500));
+          omniRes = await fetch(`${omniBase}/chat/completions`, {
+            method: 'POST', headers: omniHeaders, body: omniPayload,
+            signal: AbortSignal.timeout(30000),
+          });
+          data = await omniRes.json().catch(() => ({}));
+        }
+        if (data.error || !omniRes.ok) {
+          // OmniRoute unavailable — try Anthropic Messages API directly.
+          const anthropicKey = process.env.ANTHROPIC_API_KEY;
+          if (anthropicKey) {
+            try {
+              const anthropicTools = tools.map((t) => ({
+                name: t.function.name,
+                description: t.function.description,
+                input_schema: t.function.parameters,
+              }));
+              const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                  'x-api-key': anthropicKey,
+                  'anthropic-version': '2023-06-01',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  model: 'claude-haiku-4-5-20251001',
+                  system: systemPrompt,
+                  messages: [...safeHistory, { role: 'user', content: transcript + contextNote }],
+                  tools: anthropicTools,
+                  max_tokens: 512,
+                }),
+                signal: AbortSignal.timeout(30000),
+              });
+              const anthropicData = await anthropicRes.json().catch(() => ({}));
+              if (anthropicRes.ok && !anthropicData.error) {
+                let reply = '';
+                const tool_calls = [];
+                for (const block of (anthropicData.content || [])) {
+                  if (block.type === 'text') reply += block.text;
+                  if (block.type === 'tool_use') {
+                    tool_calls.push({ name: block.name, arguments: JSON.stringify(block.input || {}) });
+                  }
+                }
+                res.statusCode = 200;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ reply: reply.trim(), tool_calls }));
+                return;
+              }
+            } catch { /* fall through to error */ }
+          }
+          const errMsg = data.error?.message || `Voice service error (HTTP ${omniRes.status})`;
+          res.statusCode = 502;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: errMsg }));
+          return;
+        }
+        const message = data.choices?.[0]?.message || {};
+        const reply = typeof message.content === 'string' ? message.content.trim() : '';
+        const tool_calls = (message.tool_calls || []).map((tc) => ({
+          name: tc.function?.name,
+          arguments: tc.function?.arguments,
+        })).filter((tc) => tc.name);
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ reply, tool_calls }));
+      } catch {
+        res.statusCode = 502;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Voice service unavailable' }));
+      }
+    });
+
+    // Audio transcription endpoint — proxies multipart audio to OmniRoute Whisper.
+    // The client sends audio/webm from MediaRecorder; we forward it unchanged.
+    middlewares.use('/api/voice/transcribe', async (req, res) => {
+      if (req.method !== 'POST') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        return;
+      }
+      if (!_webVoiceRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ error: 'Rate limit exceeded' }));
+        return;
+      }
+      const MAX_AUDIO_BYTES = 10 * 1024 * 1024; // 10 MB covers ~5 min at low bitrate
+      try {
+        const contentType = req.headers['content-type'] || '';
+        const chunks = [];
+        let total = 0;
+        await new Promise((resolve, reject) => {
+          req.on('data', (chunk) => {
+            total += chunk.length;
+            if (total > MAX_AUDIO_BYTES) { reject(new Error('Audio too large')); return; }
+            chunks.push(chunk);
+          });
+          req.on('end', resolve);
+          req.on('error', reject);
+        });
+        const audioBuffer = Buffer.concat(chunks);
+        const omniBase = process.env.OMNI_BASE_URL || 'http://localhost:20128/v1';
+        const omniRes = await fetch(`${omniBase}/audio/transcriptions`, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer omniroute-no-auth',
+            'Content-Type': contentType,
+          },
+          body: audioBuffer,
+          signal: AbortSignal.timeout(60_000),
+        });
+        const data = await omniRes.json().catch(() => ({}));
+        const transcript = typeof data.text === 'string' ? data.text.trim() : '';
+        res.statusCode = omniRes.ok ? 200 : 502;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ transcript, error: omniRes.ok ? null : 'Transcription unavailable' }));
       } catch (error) {
         res.statusCode = 502;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: error?.message || 'Failed to create Realtime token' }));
+        res.end(JSON.stringify({ transcript: '', error: 'Transcription unavailable' }));
       }
     });
   }
@@ -5246,6 +5826,152 @@ function toFiveWordHudSummary(value) {
     .join(' ');
 }
 
+function deterministicHudSummary(context) {
+  const words = [];
+  const push = (...candidates) => {
+    for (const c of candidates) {
+      const w = String(c || '').replace(/[^\p{L}\p{N}\s-]/gu, ' ').trim().split(/\s+/).filter(Boolean);
+      for (const word of w) {
+        if (words.length < 5 && !words.some((x) => x.toLowerCase() === word.toLowerCase())) words.push(word);
+      }
+      if (words.length >= 5) break;
+    }
+  };
+  push(...(Array.isArray(context?.nearbyPlaces) ? context.nearbyPlaces.slice(0, 2) : []));
+  push(...String(context?.place || '').split(/[\s,]+/));
+  push(...String(context?.street || '').split(/[\s,]+/));
+  push(...(Array.isArray(context?.layers) ? context.layers.slice(0, 2) : []));
+  return words.slice(0, 5).join(' ');
+}
+
+// Known-place navigation index — maps normalized spoken destination to either a
+// CITY_POIS locationId (instant, no geocode) or a geocode query string (fast,
+// no LLM). Destinations are matched AFTER stripping the navigation verb prefix.
+const _NAV_PLACES = {
+  // ── CITY_POIS presets — instant camera fly, no geocode needed ─────────────
+  austin: { locationId: 'austin' },
+  'san francisco': { locationId: 'sf' },
+  sf: { locationId: 'sf' },
+  'new york': { locationId: 'nyc' },
+  'new york city': { locationId: 'nyc' },
+  nyc: { locationId: 'nyc' },
+  tokyo: { locationId: 'tokyo' },
+  london: { locationId: 'london' },
+  paris: { locationId: 'paris' },
+  dubai: { locationId: 'dubai' },
+  washington: { locationId: 'dc' },
+  'washington dc': { locationId: 'dc' },
+  dc: { locationId: 'dc' },
+  // ── Philippines cities ─────────────────────────────────────────────────────
+  manila: { query: 'Manila, Philippines' },
+  cebu: { query: 'Cebu City, Philippines' },
+  'cebu city': { query: 'Cebu City, Philippines' },
+  davao: { query: 'Davao City, Philippines' },
+  'davao city': { query: 'Davao City, Philippines' },
+  'quezon city': { query: 'Quezon City, Philippines' },
+  qc: { query: 'Quezon City, Philippines' },
+  makati: { query: 'Makati, Metro Manila, Philippines' },
+  bgc: { query: 'Bonifacio Global City, Taguig, Philippines' },
+  'bonifacio global city': { query: 'Bonifacio Global City, Taguig, Philippines' },
+  'the fort': { query: 'Bonifacio Global City, Taguig, Philippines' },
+  ortigas: { query: 'Ortigas Center, Pasig, Philippines' },
+  zamboanga: { query: 'Zamboanga City, Philippines' },
+  cdo: { query: 'Cagayan de Oro, Philippines' },
+  'cagayan de oro': { query: 'Cagayan de Oro, Philippines' },
+  gensan: { query: 'General Santos, South Cotabato, Philippines' },
+  'general santos': { query: 'General Santos, South Cotabato, Philippines' },
+  iloilo: { query: 'Iloilo City, Western Visayas, Philippines' },
+  'iloilo city': { query: 'Iloilo City, Western Visayas, Philippines' },
+  bacolod: { query: 'Bacolod, Negros Occidental, Philippines' },
+  tacloban: { query: 'Tacloban, Leyte, Philippines' },
+  palawan: { query: 'Puerto Princesa, Palawan, Philippines' },
+  'el nido': { query: 'El Nido, Palawan, Philippines' },
+  coron: { query: 'Coron, Palawan, Philippines' },
+  'puerto princesa': { query: 'Puerto Princesa, Palawan, Philippines' },
+  siargao: { query: 'Siargao Island, Surigao del Norte, Philippines' },
+  bohol: { query: 'Tagbilaran, Bohol, Philippines' },
+  panglao: { query: 'Panglao, Bohol, Philippines' },
+  tagaytay: { query: 'Tagaytay, Cavite, Philippines' },
+  clark: { query: 'Clark Freeport Zone, Pampanga, Philippines' },
+  subic: { query: 'Subic Bay Freeport Zone, Olongapo, Philippines' },
+  'subic bay': { query: 'Subic Bay Freeport Zone, Olongapo, Philippines' },
+  vigan: { query: 'Vigan, Ilocos Sur, Philippines' },
+  baguio: { query: 'Baguio, Benguet, Philippines' },
+  legazpi: { query: 'Legazpi, Albay, Philippines' },
+  naga: { query: 'Naga, Camarines Sur, Philippines' },
+  boracay: { query: 'Boracay Island, Aklan, Philippines' },
+  // ── Philippines landmarks, districts & malls ──────────────────────────────
+  intramuros: { query: 'Intramuros, Manila, Philippines' },
+  'rizal park': { query: 'Rizal Park, Manila, Philippines' },
+  luneta: { query: 'Rizal Park, Manila, Philippines' },
+  'fort santiago': { query: 'Fort Santiago, Intramuros, Manila, Philippines' },
+  naia: { query: 'Ninoy Aquino International Airport, Philippines' },
+  'naia airport': { query: 'Ninoy Aquino International Airport, Philippines' },
+  moa: { query: 'SM Mall of Asia, Pasay, Philippines' },
+  'sm mall of asia': { query: 'SM Mall of Asia, Pasay, Philippines' },
+  greenbelt: { query: 'Greenbelt, Makati, Philippines' },
+  glorietta: { query: 'Glorietta, Makati, Philippines' },
+  ayala: { query: 'Ayala Center, Makati, Philippines' },
+  trinoma: { query: 'TriNoma Mall, Quezon City, Philippines' },
+  'sm north edsa': { query: 'SM North EDSA, Quezon City, Philippines' },
+  megamall: { query: 'SM Megamall, Mandaluyong, Philippines' },
+  'sm megamall': { query: 'SM Megamall, Mandaluyong, Philippines' },
+  rockwell: { query: 'Rockwell Center, Makati, Philippines' },
+  divisoria: { query: 'Divisoria, Manila, Philippines' },
+  binondo: { query: 'Binondo, Manila, Philippines' },
+  edsa: { query: 'EDSA, Metro Manila, Philippines' },
+  // ── Other major world cities ───────────────────────────────────────────────
+  singapore: { query: 'Singapore' },
+  sydney: { query: 'Sydney, Australia' },
+  melbourne: { query: 'Melbourne, Australia' },
+  beijing: { query: 'Beijing, China' },
+  shanghai: { query: 'Shanghai, China' },
+  seoul: { query: 'Seoul, South Korea' },
+  bangkok: { query: 'Bangkok, Thailand' },
+  jakarta: { query: 'Jakarta, Indonesia' },
+  'hong kong': { query: 'Hong Kong' },
+  'kuala lumpur': { query: 'Kuala Lumpur, Malaysia' },
+  kl: { query: 'Kuala Lumpur, Malaysia' },
+  mumbai: { query: 'Mumbai, India' },
+  delhi: { query: 'New Delhi, India' },
+  'new delhi': { query: 'New Delhi, India' },
+  'los angeles': { query: 'Los Angeles, California, USA' },
+  la: { query: 'Los Angeles, California, USA' },
+  chicago: { query: 'Chicago, Illinois, USA' },
+  miami: { query: 'Miami, Florida, USA' },
+  toronto: { query: 'Toronto, Canada' },
+  vancouver: { query: 'Vancouver, Canada' },
+  berlin: { query: 'Berlin, Germany' },
+  rome: { query: 'Rome, Italy' },
+  madrid: { query: 'Madrid, Spain' },
+  amsterdam: { query: 'Amsterdam, Netherlands' },
+  moscow: { query: 'Moscow, Russia' },
+  istanbul: { query: 'Istanbul, Turkey' },
+  cairo: { query: 'Cairo, Egypt' },
+  nairobi: { query: 'Nairobi, Kenya' },
+  johannesburg: { query: 'Johannesburg, South Africa' },
+  riyadh: { query: 'Riyadh, Saudi Arabia' },
+  'abu dhabi': { query: 'Abu Dhabi, UAE' },
+  'mexico city': { query: 'Mexico City, Mexico' },
+  'sao paulo': { query: 'São Paulo, Brazil' },
+  'buenos aires': { query: 'Buenos Aires, Argentina' },
+};
+
+// Regex to detect navigation-intent prefixes in English and Filipino.
+const _NAV_INTENT_RE = /^(?:go\s+to|fly\s+to|take\s+me\s+to|show\s+me|navigate\s+to|head\s+to|bring\s+me\s+to|jump\s+to|punta\s+(?:sa\s+)?|pumunta\s+sa\s+|dalhin\s+ako\s+sa\s+|ipakita\s+(?:ang\s+|mo\s+)?)\s*(.+)/i;
+
+// If `transcript` is a simple navigation command for a pre-indexed place, return
+// a ready-to-dispatch fly_to_location tool call so the LLM is skipped entirely.
+// Returns null when the intent is unclear or the destination is not pre-indexed.
+function resolveNavigationIntent(transcript) {
+  const m = transcript.trim().match(_NAV_INTENT_RE);
+  if (!m) return null;
+  const dest = m[1].trim().replace(/[.!?,]+$/, '').toLowerCase();
+  const place = dest ? _NAV_PLACES[dest] : null;
+  if (!place) return null;
+  return { name: 'fly_to_location', arguments: JSON.stringify(place) };
+}
+
 function readRequestBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let total = 0;
@@ -5272,6 +5998,159 @@ function readRequestBody(req, maxBytes = 1024 * 1024) {
  * screen-space target without exposing the Google API key in the request.
  */
 function googlePlacesContextProxy() {
+  const OVERPASS_UA = 'gods-eye-view/0.1 (+https://github.com/DMcloud022/gods-eye-view)';
+  const NOMINATIM_UA = OVERPASS_UA;
+
+  // Philippines location alias expansion — resolves common abbreviations and
+  // informal names that Nominatim ranks poorly without country context.
+  const PH_ALIASES = new Map(Object.entries({
+    'qc':             'Quezon City, Philippines',
+    'bgc':            'Bonifacio Global City, Taguig, Philippines',
+    'cdo':            'Cagayan de Oro, Philippines',
+    'ncr':            'Metro Manila, Philippines',
+    'naia':           'Ninoy Aquino International Airport, Philippines',
+    'moa':            'SM Mall of Asia, Pasay, Philippines',
+    'sm moa':         'SM Mall of Asia, Pasay, Philippines',
+    'ortigas':        'Ortigas Center, Pasig, Philippines',
+    'makati cbd':     'Makati Central Business District, Makati, Philippines',
+    'fort bone':      'Bonifacio Global City, Taguig, Philippines',
+    'clark':          'Clark Freeport Zone, Pampanga, Philippines',
+    'subic':          'Subic Bay Freeport Zone, Olongapo, Philippines',
+    'antipolo':       'Antipolo, Rizal, Philippines',
+    'san juan metro': 'San Juan, Metro Manila, Philippines',
+    'las pinas':      'Las Piñas, Metro Manila, Philippines',
+    'paranaque':      'Parañaque, Metro Manila, Philippines',
+    'caloocan':       'Caloocan, Metro Manila, Philippines',
+    'valenzuela':     'Valenzuela, Metro Manila, Philippines',
+    'navotas':        'Navotas, Metro Manila, Philippines',
+    'malabon':        'Malabon, Metro Manila, Philippines',
+    'marikina':       'Marikina, Metro Manila, Philippines',
+    'pateros':        'Pateros, Metro Manila, Philippines',
+    'taguig':         'Taguig, Metro Manila, Philippines',
+    'muntinlupa':     'Muntinlupa, Metro Manila, Philippines',
+    'intramuros':     'Intramuros, Manila, Philippines',
+    'ermita':         'Ermita, Manila, Philippines',
+    'malate':         'Malate, Manila, Philippines',
+    'tondo':          'Tondo, Manila, Philippines',
+    'binondo':        'Binondo, Manila, Philippines',
+    'quiapo':         'Quiapo, Manila, Philippines',
+    'sampaloc':       'Sampaloc, Manila, Philippines',
+    'paco':           'Paco, Manila, Philippines',
+    'pandacan':       'Pandacan, Manila, Philippines',
+    'sta cruz':       'Santa Cruz, Manila, Philippines',
+    'santa cruz manila': 'Santa Cruz, Manila, Philippines',
+    'sto tomas':      'Santo Tomas, Batangas, Philippines',
+    'lipa':           'Lipa, Batangas, Philippines',
+    'lucena':         'Lucena, Quezon Province, Philippines',
+    'legazpi':        'Legazpi, Albay, Philippines',
+    'naga':           'Naga, Camarines Sur, Philippines',
+    'vigan':          'Vigan, Ilocos Sur, Philippines',
+    'laoag':          'Laoag, Ilocos Norte, Philippines',
+    'san fernando pampanga': 'San Fernando, Pampanga, Philippines',
+    'angeles':        'Angeles, Pampanga, Philippines',
+    'olongapo':       'Olongapo, Zambales, Philippines',
+    'san jose del monte': 'San Jose del Monte, Bulacan, Philippines',
+    'iloilo city':    'Iloilo City, Western Visayas, Philippines',
+    'bacolod':        'Bacolod, Negros Occidental, Philippines',
+    'dumaguete':      'Dumaguete, Negros Oriental, Philippines',
+    'ormoc':          'Ormoc, Leyte, Philippines',
+    'tacloban':       'Tacloban, Leyte, Philippines',
+    'butuan':         'Butuan, Agusan del Norte, Philippines',
+    'cotabato':       'Cotabato City, Maguindanao, Philippines',
+    'gensan':         'General Santos, South Cotabato, Philippines',
+    'general santos': 'General Santos, South Cotabato, Philippines',
+    'digos':          'Digos, Davao del Sur, Philippines',
+    'tagum':          'Tagum, Davao del Norte, Philippines',
+    'palawan':        'Palawan, Philippines',
+    'el nido':        'El Nido, Palawan, Philippines',
+    'coron':          'Coron, Palawan, Philippines',
+    'puerto princesa': 'Puerto Princesa, Palawan, Philippines',
+    'siargao':        'Siargao Island, Surigao del Norte, Philippines',
+    'camiguin':       'Camiguin, Philippines',
+    'bohol':          'Bohol, Philippines',
+    'panglao':        'Panglao, Bohol, Philippines',
+    'alona beach':    'Alona Beach, Panglao, Bohol, Philippines',
+    'siquijor':       'Siquijor, Philippines',
+    'mindanao':       'Mindanao, Philippines',
+    'visayas':        'Visayas, Philippines',
+    'luzon':          'Luzon, Philippines',
+    'metro manila':   'Metro Manila, Philippines',
+    'ncr metro manila': 'Metro Manila, Philippines',
+    'manila city':    'Manila, Philippines',
+    'manila bay':     'Manila Bay, Philippines',
+    'rizal park':     'Rizal Park, Manila, Philippines',
+    'luneta':         'Luneta Park, Manila, Philippines',
+    'fort santiago':  'Fort Santiago, Intramuros, Manila, Philippines',
+    'sm mall of asia': 'SM Mall of Asia, Pasay, Philippines',
+    'sm aura':        'SM Aura Premier, Taguig, Philippines',
+    'ayala malls':    'Ayala Malls Manila Bay, Parañaque, Philippines',
+    'ayala makati':   'Ayala Center, Makati, Philippines',
+    'greenbelt':      'Greenbelt, Makati, Philippines',
+    'glorietta':      'Glorietta, Makati, Philippines',
+    'robinsons manila': 'Robinsons Place Manila, Ermita, Philippines',
+    'sm north edsa':  'SM City North EDSA, Quezon City, Philippines',
+    'trinoma':        'TriNoma Mall, Quezon City, Philippines',
+    'megamall':       'SM Megamall, Mandaluyong, Philippines',
+    'rockwell':       'Rockwell Center, Makati, Philippines',
+    'bgc high street': 'High Street, Bonifacio Global City, Taguig, Philippines',
+    'the fort':       'Bonifacio Global City, Taguig, Philippines',
+    'mind museum':    'The Mind Museum, Taguig, Philippines',
+    'bgc arts center': 'BGC Arts Center, Taguig, Philippines',
+    'pasig':          'Pasig, Metro Manila, Philippines',
+    'mandaluyong':    'Mandaluyong, Metro Manila, Philippines',
+  }));
+
+  /**
+   * Expand a known Philippines abbreviation/alias to the canonical query string.
+   * Returns the expanded string, or the original if no alias matches.
+   */
+  function expandPhQuery(raw) {
+    const lower = raw.trim().toLowerCase();
+    return PH_ALIASES.get(lower) || raw;
+  }
+
+  /**
+   * Return accept-language header value appropriate for the query.
+   * Adds Filipino (fil/tl) weight when the expanded query contains "Philippines".
+   */
+  function nominatimLang(q) {
+    return /philippines/i.test(q) ? 'en,fil;q=0.9,tl;q=0.8' : 'en';
+  }
+
+  function overpassNearbyPlaces(elements, lat, lon) {
+    const seen = new Set();
+    return elements
+      .filter((el) => el.tags?.name)
+      .map((el) => {
+        const placeLatitude = el.lat ?? el.center?.lat ?? null;
+        const placeLongitude = el.lon ?? el.center?.lon ?? null;
+        const type = el.tags?.amenity || el.tags?.shop || el.tags?.tourism
+          || el.tags?.leisure || el.tags?.historic || el.tags?.office || '';
+        const addr = [el.tags?.['addr:street'], el.tags?.['addr:housenumber']]
+          .filter(Boolean).join(' ') || null;
+        return {
+          id: String(el.id),
+          name: el.tags.name,
+          address: addr,
+          latitude: placeLatitude,
+          longitude: placeLongitude,
+          distanceM: approximateDistanceM(lat, lon, placeLatitude, placeLongitude),
+          primaryType: type || null,
+          types: [type].filter(Boolean),
+          contextPriority: placeContextPriority([type].filter(Boolean)),
+        };
+      })
+      .filter((place) => {
+        const key = `${place.name}:${place.address || ''}`.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => b.contextPriority - a.contextPriority || a.distanceM - b.distanceM)
+      .map(({ contextPriority, ...place }) => place)
+      .slice(0, 20);
+  }
+
   function install(middlewares) {
     middlewares.use('/api/google/nearby-places', async (req, res) => {
       if (req.method !== 'GET') {
@@ -5280,24 +6159,11 @@ function googlePlacesContextProxy() {
         res.end(JSON.stringify({ error: 'Method not allowed', places: [] }));
         return;
       }
-
-      // Opt-in per-IP throttle (GEV_RATELIMIT_GOOGLE_PER_MIN). No-op when unset.
-      // Inlined (not the shared helper) so the 429 body keeps this endpoint's
-      // `places: []` contract that the client expects on every error response.
-      const _grl = googleRateLimiter();
-      if (_grl && !_grl(clientKey(req))) {
+      if (!_overpassRateLimiter(clientKey(req))) {
         res.statusCode = 429;
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('Retry-After', '5');
         res.end(JSON.stringify({ error: 'Rate limit exceeded', places: [] }));
-        return;
-      }
-
-      const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-      if (!apiKey) {
-        res.statusCode = 503;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'GOOGLE_MAPS_API_KEY is not set', places: [] }));
         return;
       }
 
@@ -5305,88 +6171,35 @@ function googlePlacesContextProxy() {
       const latitude = Number(requestUrl.searchParams.get('lat'));
       const longitude = Number(requestUrl.searchParams.get('lon'));
       const radiusM = Math.max(25, Math.min(5000, Number(requestUrl.searchParams.get('radiusM')) || 250));
-      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
+          || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
         res.statusCode = 400;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'Valid lat and lon are required', places: [] }));
+        res.end(JSON.stringify({ error: 'Valid lat (±90) and lon (±180) are required', places: [] }));
         return;
       }
 
       try {
-        const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+        const query = `[out:json][timeout:10];(nwr(around:${radiusM},${latitude},${longitude})[name][amenity];nwr(around:${radiusM},${latitude},${longitude})[name][shop];nwr(around:${radiusM},${latitude},${longitude})[name][tourism];nwr(around:${radiusM},${latitude},${longitude})[name][leisure];nwr(around:${radiusM},${latitude},${longitude})[name][historic];);out center;`;
+        const response = await fetch('https://overpass-api.de/api/interpreter', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': [
-              'places.id',
-              'places.displayName',
-              'places.formattedAddress',
-              'places.shortFormattedAddress',
-              'places.location',
-              'places.primaryType',
-              'places.primaryTypeDisplayName',
-              'places.types',
-            ].join(','),
-          },
-          body: JSON.stringify({
-            maxResultCount: 20,
-            rankPreference: 'DISTANCE',
-            locationRestriction: {
-              circle: {
-                center: { latitude, longitude },
-                radius: radiusM,
-              },
-            },
-          }),
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': OVERPASS_UA },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: AbortSignal.timeout(12000),
         });
         const data = await response.json().catch(() => ({}));
-        const seenPlaces = new Set();
-        const places = Array.isArray(data.places) ? data.places
-          .map((place) => {
-            const placeLatitude = place.location?.latitude ?? null;
-            const placeLongitude = place.location?.longitude ?? null;
-            const types = Array.isArray(place.types) ? place.types.slice(0, 8) : [];
-            return {
-              id: place.id || null,
-              name: place.displayName?.text || null,
-              address: place.shortFormattedAddress || place.formattedAddress || null,
-              latitude: placeLatitude,
-              longitude: placeLongitude,
-              distanceM: approximateDistanceM(latitude, longitude, placeLatitude, placeLongitude),
-              primaryType: place.primaryTypeDisplayName?.text || place.primaryType || null,
-              types,
-              contextPriority: placeContextPriority(types),
-            };
-          })
-          .filter((place) => {
-            const key = `${place.name}:${place.address || ''}`.toLowerCase();
-            if (!place.name || seenPlaces.has(key)) return false;
-            seenPlaces.add(key);
-            return true;
-          })
-          .sort((a, b) => b.contextPriority - a.contextPriority || a.distanceM - b.distanceM)
-          .map(({ contextPriority, ...place }) => place)
-          .slice(0, 20) : [];
-
-        res.statusCode = response.ok ? 200 : response.status;
+        const places = overpassNearbyPlaces(data.elements || [], latitude, longitude);
+        res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Cache-Control', 'private, max-age=300');
-        res.end(JSON.stringify({
-          places,
-          error: response.ok ? null : data.error?.message || 'Google Places request failed',
-        }));
+        res.end(JSON.stringify({ places, error: null }));
       } catch (error) {
         res.statusCode = 502;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.end(JSON.stringify({ error: error?.message || 'Google Places request failed', places: [] }));
+        res.end(JSON.stringify({ error: 'Nearby places unavailable', places: [] }));
       }
     });
 
-    // Text Search: resolve a named landmark/POI to a real coordinate, biased to
-    // the view. Geocoding scatters obscure monument/POI names across the city;
-    // a view-biased Text Search lands on the actual feature. Same key, field
-    // mask, throttle, and `places: []` error contract as nearby-places above.
     middlewares.use('/api/google/text-search', async (req, res) => {
       if (req.method !== 'GET') {
         res.statusCode = 405;
@@ -5394,12 +6207,7 @@ function googlePlacesContextProxy() {
         res.end(JSON.stringify({ error: 'Method not allowed', places: [] }));
         return;
       }
-
-      // Opt-in per-IP throttle (GEV_RATELIMIT_GOOGLE_PER_MIN). No-op when unset.
-      // Inlined (like nearby-places) so the 429 body keeps the `places: []`
-      // contract the client expects on every error response.
-      const _grl = googleRateLimiter();
-      if (_grl && !_grl(clientKey(req))) {
+      if (!_geocodeRateLimiter(clientKey(req))) {
         res.statusCode = 429;
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('Retry-After', '5');
@@ -5407,16 +6215,9 @@ function googlePlacesContextProxy() {
         return;
       }
 
-      const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-      if (!apiKey) {
-        res.statusCode = 503;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'GOOGLE_MAPS_API_KEY is not set', places: [] }));
-        return;
-      }
-
       const requestUrl = new URL(req.url || '', 'http://localhost');
-      const textQuery = String(requestUrl.searchParams.get('q') || '').trim();
+      const rawTextQuery = String(requestUrl.searchParams.get('q') || '').trim().slice(0, 500);
+      const textQuery = expandPhQuery(rawTextQuery);
       const latitude = Number(requestUrl.searchParams.get('lat'));
       const longitude = Number(requestUrl.searchParams.get('lon'));
       const radiusM = Math.max(50, Math.min(50000, Number(requestUrl.searchParams.get('radiusM')) || 4000));
@@ -5428,74 +6229,222 @@ function googlePlacesContextProxy() {
       }
 
       try {
-        const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': [
-              'places.id',
-              'places.displayName',
-              'places.formattedAddress',
-              'places.location',
-              'places.viewport',
-              'places.primaryType',
-              'places.types',
-            ].join(','),
-          },
-          body: JSON.stringify({
-            textQuery,
-            locationBias: {
-              circle: {
-                center: { latitude, longitude },
-                radius: radiusM,
-              },
-            },
-            maxResultCount: 5,
-          }),
-        });
-        const data = await response.json().catch(() => ({}));
-        const places = Array.isArray(data.places) ? data.places
-          .map((place) => {
-            const placeLatitude = place.location?.latitude ?? null;
-            const placeLongitude = place.location?.longitude ?? null;
-            const types = Array.isArray(place.types) ? place.types.slice(0, 8) : [];
-            // Places returns a lat/lng bounding box (low/high corners) framing the
-            // place — no polygon, but enough to SIZE a fallback grounds disc to the
-            // real feature instead of a blind constant. Normalize to plain numbers.
-            const vp = place.viewport;
-            const viewport = (
-              Number.isFinite(vp?.low?.latitude) && Number.isFinite(vp?.low?.longitude)
-              && Number.isFinite(vp?.high?.latitude) && Number.isFinite(vp?.high?.longitude)
-            ) ? {
-              low: { latitude: vp.low.latitude, longitude: vp.low.longitude },
-              high: { latitude: vp.high.latitude, longitude: vp.high.longitude },
-            } : null;
-            return {
-              id: place.id || null,
-              name: place.displayName?.text || null,
-              address: place.formattedAddress || null,
-              latitude: placeLatitude,
-              longitude: placeLongitude,
-              distanceM: approximateDistanceM(latitude, longitude, placeLatitude, placeLongitude),
-              primaryType: place.primaryType || null,
-              types,
-              viewport,
-            };
-          })
-          .filter((place) => place.name) : [];
-
-        res.statusCode = response.ok ? 200 : response.status;
+        const degOffset = radiusM / 111000;
+        const viewbox = `${longitude - degOffset},${latitude + degOffset},${longitude + degOffset},${latitude - degOffset}`;
+        const buildUrl = (bounded) => {
+          const u = new URL('https://nominatim.openstreetmap.org/search');
+          u.searchParams.set('format', 'json');
+          u.searchParams.set('q', textQuery);
+          u.searchParams.set('limit', '5');
+          u.searchParams.set('addressdetails', '1');
+          u.searchParams.set('viewbox', viewbox);
+          u.searchParams.set('bounded', bounded ? '1' : '0');
+          return u.toString();
+        };
+        const lang = nominatimLang(textQuery);
+        const sig = AbortSignal.timeout(8000);
+        let response = await fetch(buildUrl(true), { headers: { 'User-Agent': NOMINATIM_UA, 'accept-language': lang }, signal: sig });
+        let data = await response.json().catch(() => []);
+        // If bounded search returns nothing, retry without the constraint
+        if (!Array.isArray(data) || !data.length) {
+          response = await fetch(buildUrl(false), { headers: { 'User-Agent': NOMINATIM_UA, 'accept-language': lang }, signal: AbortSignal.timeout(5000) });
+          data = await response.json().catch(() => []);
+        }
+        const places = (Array.isArray(data) ? data : []).map((item) => {
+          const placeLatitude = parseFloat(item.lat);
+          const placeLongitude = parseFloat(item.lon);
+          const bb = item.boundingbox;
+          const viewport = bb ? {
+            low: { latitude: parseFloat(bb[0]), longitude: parseFloat(bb[2]) },
+            high: { latitude: parseFloat(bb[1]), longitude: parseFloat(bb[3]) },
+          } : null;
+          return {
+            id: String(item.place_id),
+            name: item.display_name?.split(',')[0]?.trim() || null,
+            address: item.display_name || null,
+            latitude: placeLatitude,
+            longitude: placeLongitude,
+            distanceM: approximateDistanceM(latitude, longitude, placeLatitude, placeLongitude),
+            primaryType: item.type || item.class || null,
+            types: [item.type, item.class].filter(Boolean),
+            viewport,
+          };
+        }).filter((p) => p.name && p.distanceM <= radiusM * 4);
+        res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Cache-Control', 'private, max-age=300');
-        res.end(JSON.stringify({
-          places,
-          error: response.ok ? null : data.error?.message || 'Google Places request failed',
-        }));
+        res.end(JSON.stringify({ places, error: null }));
       } catch (error) {
         res.statusCode = 502;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.end(JSON.stringify({ error: error?.message || 'Google Places request failed', places: [] }));
+        res.end(JSON.stringify({ error: 'Text search unavailable', places: [] }));
+      }
+    });
+
+    middlewares.use('/api/geocode', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ status: 'UNKNOWN_ERROR', results: [] }));
+        return;
+      }
+      if (!_geocodeRateLimiter(clientKey(req))) {
+        res.statusCode = 429;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Retry-After', '5');
+        res.end(JSON.stringify({ status: 'RATE_LIMIT', results: [] }));
+        return;
+      }
+      const requestUrl = new URL(req.url || '', 'http://localhost');
+      const rawQ = String(requestUrl.searchParams.get('q') || '').trim().slice(0, 500);
+      const q = expandPhQuery(rawQ);
+      const latlng = String(requestUrl.searchParams.get('latlng') || '').trim();
+      const bounds = String(requestUrl.searchParams.get('bounds') || '').trim();
+      const countryHint = String(requestUrl.searchParams.get('countryHint') || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 2);
+
+      try {
+        if (latlng) {
+          const [latStr, lngStr] = latlng.split(',');
+          const lat = parseFloat(latStr);
+          const lng = parseFloat(lngStr);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ status: 'INVALID_REQUEST', results: [] }));
+            return;
+          }
+          const reverseUrl = new URL('https://nominatim.openstreetmap.org/reverse');
+          reverseUrl.searchParams.set('format', 'json');
+          reverseUrl.searchParams.set('lat', String(lat));
+          reverseUrl.searchParams.set('lon', String(lng));
+          reverseUrl.searchParams.set('addressdetails', '1');
+          reverseUrl.searchParams.set('zoom', '18');
+          const response = await fetch(reverseUrl.toString(), {
+            headers: { 'User-Agent': NOMINATIM_UA },
+            signal: AbortSignal.timeout(8000),
+          });
+          const item = await response.json().catch(() => ({}));
+          if (!item?.lat) {
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ status: 'ZERO_RESULTS', results: [] }));
+            return;
+          }
+          const addr = item.address || {};
+          const locality = addr.city || addr.town || addr.village || addr.hamlet || null;
+          const components = [
+            addr.house_number && { long_name: addr.house_number, types: ['street_number'] },
+            addr.road && { long_name: addr.road, types: ['route'] },
+            addr.neighbourhood && { long_name: addr.neighbourhood, types: ['neighborhood', 'political'] },
+            locality && { long_name: locality, types: ['locality', 'political'] },
+            addr.county && { long_name: addr.county, types: ['administrative_area_level_2', 'political'] },
+            addr.state && { long_name: addr.state, types: ['administrative_area_level_1', 'political'] },
+            addr.country && { long_name: addr.country, types: ['country', 'political'] },
+            addr.postcode && { long_name: addr.postcode, types: ['postal_code'] },
+          ].filter(Boolean);
+          const bb = item.boundingbox;
+          const bounds2 = bb ? {
+            northeast: { lat: parseFloat(bb[1]), lng: parseFloat(bb[3]) },
+            southwest: { lat: parseFloat(bb[0]), lng: parseFloat(bb[2]) },
+          } : undefined;
+          const result = {
+            formatted_address: item.display_name,
+            geometry: { location: { lat: parseFloat(item.lat), lng: parseFloat(item.lon) }, bounds: bounds2, viewport: bounds2 },
+            types: [item.type, item.class].filter(Boolean),
+            address_components: components,
+            place_id: String(item.place_id),
+          };
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'private, max-age=300');
+          res.end(JSON.stringify({ status: 'OK', results: [result, result, result].slice(0, 3) }));
+          return;
+        }
+
+        if (!q) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ status: 'INVALID_REQUEST', results: [] }));
+          return;
+        }
+        const forwardUrl = new URL('https://nominatim.openstreetmap.org/search');
+        forwardUrl.searchParams.set('format', 'json');
+        forwardUrl.searchParams.set('q', q);
+        forwardUrl.searchParams.set('limit', '5');
+        forwardUrl.searchParams.set('addressdetails', '1');
+        // When the caller or alias expansion signals a country, bias Nominatim results.
+        const effectiveCountryHint = countryHint || (/philippines/i.test(q) ? 'ph' : '');
+        if (effectiveCountryHint) forwardUrl.searchParams.set('countrycodes', effectiveCountryHint);
+        if (bounds) {
+          // Accept two formats:
+          //  "swLat,swLng|neLat,neLng" — viewportBias() output (pipe-separated SW|NE corners)
+          //  "w,s,e,n"                 — Nominatim standard (single comma-separated quad)
+          let w, s, e, n;
+          if (bounds.includes('|')) {
+            const [sw, ne] = bounds.split('|');
+            const [swLat, swLng] = sw.split(',').map(Number);
+            const [neLat, neLng] = ne.split(',').map(Number);
+            w = swLng; s = swLat; e = neLng; n = neLat;
+          } else {
+            [w, s, e, n] = bounds.split(',').map(Number);
+          }
+          const validBounds = [w, s, e, n].every(Number.isFinite)
+            && Math.abs(s) <= 90 && Math.abs(n) <= 90
+            && Math.abs(w) <= 180 && Math.abs(e) <= 180;
+          if (!validBounds) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ status: 'INVALID_REQUEST', results: [] }));
+            return;
+          }
+          forwardUrl.searchParams.set('viewbox', `${w},${n},${e},${s}`);
+          forwardUrl.searchParams.set('bounded', '0');
+        }
+        const fwdLang = nominatimLang(q);
+        const response = await fetch(forwardUrl.toString(), {
+          headers: { 'User-Agent': NOMINATIM_UA, 'accept-language': fwdLang },
+          signal: AbortSignal.timeout(8000),
+        });
+        const data = await response.json().catch(() => []);
+        if (!Array.isArray(data) || !data.length) {
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ status: 'ZERO_RESULTS', results: [] }));
+          return;
+        }
+        const results = data.map((item) => {
+          const bb = item.boundingbox;
+          const bounds2 = bb ? {
+            northeast: { lat: parseFloat(bb[1]), lng: parseFloat(bb[3]) },
+            southwest: { lat: parseFloat(bb[0]), lng: parseFloat(bb[2]) },
+          } : undefined;
+          const addr = item.address || {};
+          const locality = addr.city || addr.town || addr.village || addr.hamlet || null;
+          const components = [
+            addr.house_number && { long_name: addr.house_number, types: ['street_number'] },
+            addr.road && { long_name: addr.road, types: ['route'] },
+            locality && { long_name: locality, types: ['locality', 'political'] },
+            addr.county && { long_name: addr.county, types: ['administrative_area_level_2', 'political'] },
+            addr.state && { long_name: addr.state, types: ['administrative_area_level_1', 'political'] },
+            addr.country && { long_name: addr.country, types: ['country', 'political'] },
+            addr.postcode && { long_name: addr.postcode, types: ['postal_code'] },
+          ].filter(Boolean);
+          return {
+            formatted_address: item.display_name,
+            geometry: { location: { lat: parseFloat(item.lat), lng: parseFloat(item.lon) }, bounds: bounds2, viewport: bounds2 },
+            types: [item.type, item.class].filter(Boolean),
+            address_components: components,
+            place_id: String(item.place_id),
+          };
+        });
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.end(JSON.stringify({ status: 'OK', results }));
+      } catch (error) {
+        res.statusCode = 502;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ status: 'UNKNOWN_ERROR', results: [] }));
       }
     });
   }
@@ -5640,10 +6589,12 @@ const GEV_REALTIME_TOOLS = [
         layerId: {
           type: 'string',
           description:
-            'Common-name mapping for the non-obvious ids: space mission(s) → rocket-launches; fires/wildfires/active fires → local-firms (NASA FIRMS); ships/vessels/boats → ais-live-vessels; undersea/submarine cables → telegeography-submarine-cables; datacenters → local-datacenters; dams → local-dams; bikes/bike share → bikeshare; street traffic/congestion → traffic; traffic cameras → cctv; internet radio/stations → radio.',
+            'Common-name mapping for the non-obvious ids: space mission(s) → rocket-launches; fires/wildfires/active fires → local-firms (NASA FIRMS); ships/vessels/boats → ais-live-vessels; undersea/submarine cables → telegeography-submarine-cables; datacenters → local-datacenters; dams → local-dams; bikes/bike share → bikeshare; street traffic/congestion → traffic; traffic cameras → cctv; internet radio/stations → radio; weather alerts/NWS warnings → noaa-alerts; SIGMETs/aviation hazards/turbulence/icing/typhoon weather → aviation-sigmets; military bases/installations → military-installations; military airspace/restricted zones → military-awareness.',
           enum: [
             'flights',
             'military',
+            'military-installations',
+            'military-awareness',
             'earthquakes',
             'satellites',
             'rocket-launches',
@@ -5656,6 +6607,8 @@ const GEV_REALTIME_TOOLS = [
             'local-dams',
             'telegeography-submarine-cables',
             'local-firms',
+            'noaa-alerts',
+            'aviation-sigmets',
           ],
         },
         enabled: { type: 'boolean' },
@@ -5676,8 +6629,10 @@ const GEV_REALTIME_TOOLS = [
           enum: [
             'flights',
             'military',
+            'military-installations',
             'earthquakes',
             'satellites',
+            'rocket-launches',
             'traffic',
             'cctv',
             'radio',
@@ -5687,8 +6642,10 @@ const GEV_REALTIME_TOOLS = [
             'local-dams',
             'telegeography-submarine-cables',
             'local-firms',
+            'noaa-alerts',
+            'aviation-sigmets',
           ],
-          description: 'Optional layer row to scroll into view and highlight.',
+          description: 'Optional layer row to scroll into view and highlight. Only layers visible in the toggle panel are valid here.',
         },
       },
     },
@@ -5720,8 +6677,8 @@ const GEV_REALTIME_TOOLS = [
       properties: {
         mode: {
           type: 'string',
-          enum: ['off', 'contacts', 'flights', 'space-missions', 'missions'],
-          description: 'Use off to exit context mode.',
+          enum: ['off', 'contacts', 'space-missions'],
+          description: 'contacts = Live Contacts panel (aircraft, vessels, installations). space-missions = Space Missions panel. off = exit context mode.',
         },
       },
       required: ['mode'],
@@ -5848,8 +6805,8 @@ const GEV_REALTIME_TOOLS = [
       properties: {
         stack: {
           type: 'string',
-          enum: ['photoreal', 'bing-aerial', 'bing-labels', 'osm'],
-          description: 'photoreal = Google 3D. Use bing-aerial only when the user explicitly says "Bing aerial" — "satellite(s)" never means a basemap.',
+          enum: ['photoreal', 'maptiler-satellite', 'maptiler-hybrid', 'esri-satellite', 'carto-dark', 'osm'],
+          description: 'photoreal = Google 3D Tiles. maptiler-satellite = satellite imagery (no labels). maptiler-hybrid = satellite + labels. esri-satellite = Esri World Imagery. carto-dark = dark basemap. osm = OpenStreetMap road map. "satellite"/"satellites" alone ALWAYS means the satellites DATA LAYER, never a basemap.',
         },
       },
       required: ['stack'],
@@ -7271,6 +8228,214 @@ function weatherEffectsProxy() {
   };
 }
 
+/**
+ * Vite plugin: NOAA Weather Alerts proxy.
+ * Upstream: https://api.weather.gov/alerts/active — GeoJSON, no key required.
+ * Adds the User-Agent header mandated by NWS ToS and caches for 3 min.
+ */
+function noaaAlertsProxy() {
+  let _cache = null;
+  let _cacheAt = 0;
+  const CACHE_MS = 3 * 60 * 1000;
+
+  function install(middlewares) {
+    middlewares.use('/api/noaa-alerts', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        return;
+      }
+      try {
+        const now = Date.now();
+        if (_cache && now - _cacheAt < CACHE_MS) {
+          res.writeHead(200, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'HIT' });
+          res.end(_cache);
+          return;
+        }
+        const upstream = await fetch(
+          'https://api.weather.gov/alerts/active?status=actual&message_type=alert,update',
+          {
+            headers: {
+              'User-Agent': 'gods-eye-view/1.0 (non-commercial OSINT viewer)',
+              Accept: 'application/geo+json',
+            },
+            signal: AbortSignal.timeout(12000),
+          },
+        );
+        const { tooLarge, text: body } = await readCappedResponseText(upstream, 4 * 1024 * 1024);
+        if (tooLarge) {
+          res.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ error: 'NOAA response too large' }));
+          return;
+        }
+        if (upstream.ok) { _cache = body; _cacheAt = now; }
+        res.writeHead(upstream.status, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'MISS' });
+        res.end(body);
+      } catch (e) {
+        if (_cache) {
+          res.writeHead(200, { 'Content-Type': 'application/geo+json', 'X-Cache': 'STALE' });
+          res.end(_cache);
+          return;
+        }
+        console.error('[NOAA Alerts Proxy]', e.message);
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'NOAA Alerts unavailable' }));
+      }
+    });
+  }
+
+  return {
+    name: 'noaa-alerts-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
+  };
+}
+
+/**
+ * Vite plugin: Aviation SIGMET proxy.
+ * Upstream: https://aviationweather.gov/api/data/sigmet — GeoJSON, no key required.
+ * Covers global convective/turbulence/icing/ash hazards. Caches for 6 min.
+ */
+function sigmetProxy() {
+  let _cache = null;
+  let _cacheAt = 0;
+  const CACHE_MS = 6 * 60 * 1000;
+
+  function install(middlewares) {
+    middlewares.use('/api/sigmet', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        return;
+      }
+      try {
+        const now = Date.now();
+        if (_cache && now - _cacheAt < CACHE_MS) {
+          res.writeHead(200, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'HIT' });
+          res.end(_cache);
+          return;
+        }
+        const upstream = await fetch(
+          'https://aviationweather.gov/api/data/sigmet?format=geojson&hazard=TURB,ICE,TS,ASH',
+          {
+            headers: {
+              'User-Agent': 'gods-eye-view/1.0 (non-commercial OSINT viewer)',
+              Accept: 'application/geo+json, application/json',
+            },
+            signal: AbortSignal.timeout(12000),
+          },
+        );
+        const { tooLarge, text: body } = await readCappedResponseText(upstream, 2 * 1024 * 1024);
+        if (tooLarge) {
+          res.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ error: 'SIGMET response too large' }));
+          return;
+        }
+        if (upstream.ok) { _cache = body; _cacheAt = now; }
+        res.writeHead(upstream.status, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'MISS' });
+        res.end(body);
+      } catch (e) {
+        if (_cache) {
+          res.writeHead(200, { 'Content-Type': 'application/geo+json', 'X-Cache': 'STALE' });
+          res.end(_cache);
+          return;
+        }
+        console.error('[SIGMET Proxy]', e.message);
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'SIGMET proxy unavailable' }));
+      }
+    });
+  }
+
+  return {
+    name: 'sigmet-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
+  };
+}
+
+// Photon autocomplete proxy — Photon is free, no key, real-time place suggestions.
+// Rate-limited to 30/min per IP; responses cached 45 s (aggressive — query text changes
+// per keystroke so the cache mostly absorbs identical retries and back-navigation).
+const _autocompleteRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 30, globalMax: 300 });
+
+function autocompleteProxy() {
+  const CACHE = new Map();  // key → {json, at}
+  const CACHE_MS = 45_000;
+  const MAX_CACHE = 400;
+
+  function install(middlewares) {
+    middlewares.use('/api/autocomplete', async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ suggestions: [] }));
+        return;
+      }
+      if (!_autocompleteRateLimiter(clientKey(req))) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '3' });
+        res.end(JSON.stringify({ suggestions: [] }));
+        return;
+      }
+      const requestUrl = new URL(req.url || '', 'http://localhost');
+      const q = String(requestUrl.searchParams.get('q') || '').trim().slice(0, 200);
+      if (q.length < 2) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ suggestions: [] }));
+        return;
+      }
+      const cacheKey = q.toLowerCase();
+      const cached = CACHE.get(cacheKey);
+      if (cached && Date.now() - cached.at < CACHE_MS) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'X-Cache': 'HIT' });
+        res.end(cached.json);
+        return;
+      }
+      try {
+        const photonUrl = new URL('https://photon.komoot.io/api/');
+        photonUrl.searchParams.set('q', q);
+        photonUrl.searchParams.set('limit', '6');
+        photonUrl.searchParams.set('lang', 'en');
+        const upstream = await fetch(photonUrl.toString(), {
+          headers: { 'User-Agent': NOMINATIM_UA },
+          signal: AbortSignal.timeout(5000),
+        });
+        const geojson = await upstream.json().catch(() => ({ features: [] }));
+        const features = Array.isArray(geojson?.features) ? geojson.features : [];
+        const suggestions = features
+          .filter((f) => f?.geometry?.coordinates?.length === 2)
+          .map((f) => {
+            const p = f.properties || {};
+            const [lon, lat] = f.geometry.coordinates;
+            const name = p.name || p.city || p.state || '';
+            const parts = [p.city, p.state, p.country].filter(Boolean);
+            if (p.name && parts[0] === p.name) parts.shift();
+            const sub = parts.join(', ');
+            const extent = Array.isArray(p.extent) && p.extent.length === 4 ? p.extent : null;
+            return { label: name, sub, lat, lon, type: p.type || p.osm_value || '', extent };
+          })
+          .filter((s) => s.label);
+        const json = JSON.stringify({ suggestions });
+        if (CACHE.size >= MAX_CACHE) {
+          const oldest = CACHE.keys().next().value;
+          CACHE.delete(oldest);
+        }
+        CACHE.set(cacheKey, { json, at: Date.now() });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, max-age=45' });
+        res.end(json);
+      } catch {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ suggestions: [] }));
+      }
+    });
+  }
+
+  return {
+    name: 'autocomplete-proxy',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
+  };
+}
+
 function parseJsonEnv(key, fallback) {
   const value = process.env[key];
   if (!value) return fallback;
@@ -7360,6 +8525,9 @@ export default defineConfig(({ mode }) => {
       trackBackfillProxies(),
       openAiRealtimeProxy(),
       googlePlacesContextProxy(),
+      noaaAlertsProxy(),
+      sigmetProxy(),
+      autocompleteProxy(),
     ],
     server: {
       host: env.HOST || 'localhost',
@@ -7371,8 +8539,12 @@ export default defineConfig(({ mode }) => {
     },
     // Expose selected API keys to the browser via import.meta.env.*
     define: {
-      'import.meta.env.GOOGLE_MAPS_API_KEY': JSON.stringify(env.GOOGLE_MAPS_API_KEY),
-      'import.meta.env.CESIUM_ION_TOKEN': JSON.stringify(env.CESIUM_ION_TOKEN),
+      'import.meta.env.GOOGLE_MAPS_API_KEY': JSON.stringify(env.GOOGLE_MAPS_API_KEY || ''),
+      'import.meta.env.CESIUM_ION_TOKEN': JSON.stringify(env.CESIUM_ION_TOKEN || ''),
+      'import.meta.env.MAPTILER_API_KEY': JSON.stringify(env.MAPTILER_API_KEY || ''),
+      // Always true — NASA EONET provides keyless wildfire data as a free fallback.
+      // Set FIRMS_MAP_KEY for higher-resolution per-pixel satellite detections.
+      'import.meta.env.FIRMS_AVAILABLE': JSON.stringify(true),
     },
     build: {
       // The Cesium engine bundle is inherently large; raise the warning ceiling

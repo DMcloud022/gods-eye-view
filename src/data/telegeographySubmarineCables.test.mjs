@@ -151,7 +151,7 @@ test('cable ground lines classify against exactly the active surface on every st
     Cesium.ClassificationType.CESIUM_3D_TILE,
   );
   // Every globe stack renders imagery on the shown globe — terrain pass only.
-  for (const stackId of ['bing-aerial', 'bing-labels', 'osm']) {
+  for (const stackId of ['maptiler-satellite', 'maptiler-hybrid', 'esri-satellite', 'carto-dark', 'osm']) {
     assert.equal(
       cableClassificationTypeForStack(stackId),
       Cesium.ClassificationType.TERRAIN,
@@ -165,6 +165,8 @@ test('cable ground lines classify against exactly the active surface on every st
   // stack instead of degrading to the documented safe behavior.
   assert.equal(cableClassificationTypeForStack('some-future-stack'), Cesium.ClassificationType.BOTH);
   assert.equal(cableClassificationTypeForStack('photoreal-v2'), Cesium.ClassificationType.BOTH);
+  // Retired Bing ids are unknown now, so stale links degrade to the safe fallback.
+  assert.equal(cableClassificationTypeForStack('bing-aerial'), Cesium.ClassificationType.BOTH);
   assert.equal(cableClassificationTypeForStack(''), Cesium.ClassificationType.BOTH);
   assert.equal(cableClassificationTypeForStack(undefined), Cesium.ClassificationType.BOTH);
   assert.equal(cableClassificationTypeForStack(null), Cesium.ClassificationType.BOTH);

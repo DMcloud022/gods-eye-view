@@ -113,9 +113,11 @@ test('the two Context/Cockpit tools pin their enums and required arguments', () 
 
   const contextMode = byName.get('set_context_mode');
   assert.deepEqual(contextMode.parameters.required, ['mode']);
+  // Only the user-facing names are offered; 'flights'/'missions' are internal
+  // ids that normalizeContextMode still accepts but the model must not emit.
   assert.deepEqual(
     contextMode.parameters.properties.mode.enum,
-    ['off', 'contacts', 'flights', 'space-missions', 'missions'],
+    ['off', 'contacts', 'space-missions'],
   );
 
   const cockpit = byName.get('control_cockpit');
@@ -154,11 +156,29 @@ test('the edited existing tools changed exactly as intended', () => {
   const location = byName.get('fly_to_location');
   assert.equal(location.parameters.properties.waitForArrival.type, 'boolean');
   assert.match(location.parameters.properties.waitForArrival.description, /arrived=true/);
+
+  // Edit 4: the basemap enum is exactly the shipped MAP_STACKS — a retired id
+  // here would fail at the controller as "Unknown map stack".
+  const controller = readFileSync(new URL('./mapStackController.js', import.meta.url), 'utf8');
+  const stacksSrc = controller.slice(controller.indexOf('export const MAP_STACKS'), controller.indexOf('\n];'));
+  const shippedStacks = [...stacksSrc.matchAll(/^    id: '([^']+)',$/gm)].map((m) => m[1]);
+  assert.ok(shippedStacks.length > 0, 'could not parse MAP_STACKS');
+  assert.deepEqual(byName.get('set_map_stack').parameters.properties.stack.enum, shippedStacks);
+
+  // Edit 5: the weather and military layers are voice-addressable.
+  for (const toolName of ['set_layer_visibility', 'show_data_layers_menu']) {
+    const layerEnum = byName.get(toolName).parameters.properties.layerId.enum;
+    for (const layerId of ['military-installations', 'noaa-alerts', 'aviation-sigmets']) {
+      assert.ok(layerEnum.includes(layerId), `${toolName} must offer ${layerId}`);
+    }
+  }
+  assert.ok(byName.get('set_layer_visibility').parameters.properties.layerId.enum.includes('military-awareness'));
 });
 
 test('no unchanged Realtime tool definition drifts silently', () => {
-  // Context/Cockpit parity, the dependent-location wait edit, and the retired
-  // `bing-road` stack leaving `set_map_stack`'s enum are the known schema
+  // Context/Cockpit parity, the dependent-location wait edit, the MapTiler/
+  // Esri/CARTO basemaps replacing Bing in `set_map_stack`, and the weather +
+  // military layers joining the two layer tools are the known schema
   // changes. Everything else must be byte-identical: an unnoticed edit
   // to a shipped tool changes
   // model behavior in production with nothing in review to catch it.
@@ -174,16 +194,18 @@ test('no unchanged Realtime tool definition drifts silently', () => {
     'fly_to_location',
     'select_nearest_aircraft',
     'set_map_stack',
+    'set_layer_visibility',
+    'show_data_layers_menu',
   ]);
   const unchanged = realtimeTools()
     .filter((tool) => !TOUCHED.has(tool.name))
     .sort((a, b) => a.name.localeCompare(b.name));
-  assert.equal(unchanged.length, 21);
+  assert.equal(unchanged.length, 19);
   const digest = createHash('sha256')
     .update(JSON.stringify(unchanged))
     .digest('hex')
     .slice(0, 16);
-  assert.equal(digest, '802ed694b8887b88', 'an unchanged Realtime tool definition drifted');
+  assert.equal(digest, 'bec5d5804021d11d', 'an unchanged Realtime tool definition drifted');
 });
 
 test('Radio volume and mission speed share the Sharpen slider visual language', () => {

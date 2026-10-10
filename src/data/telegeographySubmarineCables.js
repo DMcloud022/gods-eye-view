@@ -197,8 +197,8 @@ export function createCableOverlayPublisher({
 }
 
 /**
- * `MAP_STACKS` ids that render imagery on the SHOWN Cesium globe (the ion
- * Bing stacks + OSM). Deliberately an explicit allowlist, not "anything that
+ * `MAP_STACKS` ids that render imagery on the SHOWN Cesium globe (MapTiler,
+ * Esri, CARTO and OSM). Deliberately an explicit allowlist, not "anything that
  * is not photoreal": an id this module has never heard of is UNKNOWN, and
  * unknown must reach the documented BOTH fallback rather than being asserted
  * onto the terrain surface. A stack added to `MAP_STACKS` without being added
@@ -207,14 +207,14 @@ export function createCableOverlayPublisher({
  * real `MAP_STACKS` so the omission is caught loudly.
  */
 const CABLE_GLOBE_STACK_IDS = Object.freeze(
-  new Set(['bing-aerial', 'bing-labels', 'osm']),
+  new Set(['maptiler-satellite', 'maptiler-hybrid', 'esri-satellite', 'carto-dark', 'osm']),
 );
 
 /**
  * Ground-line classification for one map stack. The photoreal stack renders
  * Google 3D tiles with the Cesium globe HIDDEN, so cable ground lines only
  * need the 3D-tile classification pass there; every other known stack (the
- * bing stacks and osm) renders imagery on the shown globe, so only the
+ * imagery stacks) renders imagery on the shown globe, so only the
  * terrain pass applies.
  * Classifying against just the active surface halves the batched
  * GroundPolylinePrimitive's emitted command sets. BOTH is the safe fallback

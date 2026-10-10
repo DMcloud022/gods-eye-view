@@ -40,7 +40,7 @@ test('a free-text search records its destination for the LOCATION mini-status', 
     handler,
     /this\._searchedLocationLabel = destination\.label[\s\S]{0,120}?this\._setActiveLocation\(null\);/,
   );
-  assert.match(handler, /this\._updateLocationMiniStatus\(\);/);
+  assert.match(handler, /this\._updateLocationMiniStatus(?:\?\.)?\(\);/);
 });
 
 test('the mini-status reads its copy from the shared formatter', () => {

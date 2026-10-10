@@ -162,9 +162,9 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
     overlayHost.setVisible(EARTHQUAKE_OVERLAY_SOURCE_ID, false);
   },
 
-  async update(viewer) {
+  async update(viewer, { signal } = {}) {
     try {
-      const response = await fetch(API_URL);
+      const response = await fetch(API_URL, { signal: signal ?? AbortSignal.timeout(20000) });
       if (!response.ok) {
         _lastError = `USGS HTTP ${response.status}`;
         console.warn(`[Data:Earthquakes] API returned ${response.status}`);
@@ -182,6 +182,7 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
       const overlayEntries = [];
 
       for (const feature of geojson.features) {
+        if (!feature.geometry?.coordinates) continue;
         const [lon, lat, depthKm] = feature.geometry.coordinates;
         const mag = feature.properties.mag;
         const place = feature.properties.place;

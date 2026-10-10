@@ -1,5 +1,6 @@
 import { createAnnotationEngine } from './annotationEngine.js';
 import { createHybridAnnotationRenderer } from './hybridAnnotationRenderer.js';
+import { annotationsToFeatureCollection } from './annotationGeoJson.js';
 
 /**
  * Initialize the map-annotation engine and expose it for the voice agent and
@@ -17,6 +18,11 @@ export function initAnnotations({ viewer, tileset = null }) {
   }
   const renderer = createHybridAnnotationRenderer(viewer);
   const engine = createAnnotationEngine({ viewer, renderer });
+
+  // Export current annotations as a GeoJSON FeatureCollection.
+  // Usage: window.__gevAnnotations.exportGeoJson()
+  engine.exportGeoJson = () => annotationsToFeatureCollection(engine.list());
+
   window.__gevAnnotations = engine;
   return engine;
 }

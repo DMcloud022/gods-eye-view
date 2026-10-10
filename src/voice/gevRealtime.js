@@ -1,4 +1,5 @@
 import { createGevActionRunner, readLayerLifecycleSummary } from './gevActions.js';
+import { GevWebVoiceController } from './gevWebVoice.js';
 import {
   DEFAULT_VOICE_TIER,
   VOICE_COST_LIMITS,
@@ -193,22 +194,37 @@ export function silenceRadioForVoice({ duckRadio, pauseRadio } = {}) {
  */
 const SUPERSEDED_RESPONSE_MEMORY = 8;
 
-export function initGevVoiceCommands({ viewer, styleManager, dataManager, sceneDirector = null, annotations = null }) {
+export async function initGevVoiceCommands({ viewer, styleManager, dataManager, sceneDirector = null, annotations = null }) {
   if (window.__gevVoiceCommands && typeof window.__gevVoiceCommands.stop === 'function') {
     window.__gevVoiceCommands.stop({ removeUi: true });
   }
   const runner = createGevActionRunner({ viewer, styleManager, dataManager, sceneDirector, annotations });
   const ui = createVoiceControl({ reset: true });
   const radioLayer = dataManager?.layers?.get('radio')?.module || null;
-  const controller = new GevRealtimeController({ runner, ui, radioLayer, dataManager });
-  // Deferred annotation outlines finish AFTER their tool result returned. Feed the
-  // final outcome (resolved / failed) into the conversation so the model can honestly
-  // confirm — or correct — what it narrated about a boundary it never saw land.
-  if (annotations && typeof annotations.onOutlineEvent === 'function') {
-    controller.annotationEventUnsubscribe = annotations.onOutlineEvent((evt) => {
-      controller.notifyMapEvent({ type: 'map_annotation_outline', ...evt });
-    });
+
+  // Probe whether the OpenAI Realtime key is configured. The /api/voice/mode
+  // endpoint answers synchronously from process.env — no external calls.
+  let useWebVoice = false;
+  try {
+    const modeRes = await fetch('/api/voice/mode', { cache: 'no-store', signal: AbortSignal.timeout(3000) });
+    const modeData = await modeRes.json().catch(() => ({}));
+    useWebVoice = modeData.mode === 'web';
+  } catch { /* network error — fall through to Realtime */ }
+
+  let controller;
+  if (useWebVoice) {
+    controller = new GevWebVoiceController({ runner, ui });
+  } else {
+    controller = new GevRealtimeController({ runner, ui, radioLayer, dataManager });
+    // Deferred annotation outlines finish AFTER their tool result returned. Feed
+    // the final outcome into the conversation so the model can confirm or correct.
+    if (annotations && typeof annotations.onOutlineEvent === 'function') {
+      controller.annotationEventUnsubscribe = annotations.onOutlineEvent((evt) => {
+        controller.notifyMapEvent({ type: 'map_annotation_outline', ...evt });
+      });
+    }
   }
+
   controller.buttonHandler = () => {
     if (shouldIgnoreVoiceButtonClick(controller.spaceKeyHeld)) return;
     if (controller.isActive()) controller.stop();

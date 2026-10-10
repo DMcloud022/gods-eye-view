@@ -12,7 +12,7 @@ import {
   clampBloomIntensity,
   decodeBloomIntensity,
 } from './bloom.js';
-import { LOCATIONS, CITY_POIS, GLOBE_VIEW, flyToGlobeView, flyToPresetLocation, flyToPOI, searchAndFlyTo } from './locations.js';
+import { LOCATIONS, CITY_POIS, GLOBE_VIEW, flyToGlobeView, flyToLandmark, flyToPresetLocation, flyToPOI, searchAndFlyTo } from './locations.js';
 import { locationMiniStatus } from './locationStatus.js';
 import { interruptCameraMotion } from './cameraVerbs.js';
 import {
@@ -196,6 +196,198 @@ import {
 } from './cockpitMath.js';
 
 /** Duration (ms) for shader intensity crossfade between style presets. */
+// ── Autocomplete helpers (module-level, no class state needed) ───────────────
+
+// Icon emoji for autocomplete suggestions based on Photon place type.
+function _acIcon(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'country') return '🌍';
+  if (t === 'state' || t === 'county') return '🗺️';
+  if (t === 'city' || t === 'town') return '🏙️';
+  if (t === 'village' || t === 'hamlet' || t === 'suburb' || t === 'neighbourhood') return '🏘️';
+  if (t === 'airport') return '✈️';
+  if (t === 'hospital') return '🏥';
+  if (t === 'university' || t === 'school') return '🎓';
+  if (t === 'hotel' || t === 'hostel') return '🏨';
+  if (t === 'restaurant' || t === 'cafe' || t === 'bar' || t === 'food') return '🍽️';
+  if (t === 'park' || t === 'garden' || t === 'nature') return '🌿';
+  if (t === 'beach') return '🏖️';
+  if (t === 'mountain' || t === 'peak') return '⛰️';
+  if (t === 'island') return '🏝️';
+  if (t === 'museum' || t === 'attraction' || t === 'artwork') return '🏛️';
+  if (t === 'mall' || t === 'shop' || t === 'supermarket') return '🛍️';
+  if (t === 'station' || t === 'bus_stop' || t === 'bus_station') return '🚉';
+  if (t === 'poi' || t === 'landmark') return '🗺️';
+  return '📍';
+}
+
+// Approximate camera range (meters) for an autocomplete result.
+// Uses the bounding box when present; falls back to type heuristics.
+function _acRange(type, extent) {
+  if (Array.isArray(extent) && extent.length === 4) {
+    const [minLon, maxLat, maxLon, minLat] = extent;
+    const latSpanKm = Math.abs(maxLat - minLat) * 111;
+    const lonSpanKm = Math.abs(maxLon - minLon) * 111 * Math.cos((maxLat + minLat) / 2 * Math.PI / 180);
+    const diagKm = Math.hypot(latSpanKm, lonSpanKm);
+    return Math.max(500, Math.min(diagKm * 750, 8_000_000));
+  }
+  const t = String(type || '').toLowerCase();
+  if (t === 'country') return 2_000_000;
+  if (t === 'state' || t === 'county') return 300_000;
+  if (t === 'city') return 12_000;
+  if (t === 'town') return 6_000;
+  if (t === 'village' || t === 'suburb' || t === 'neighbourhood') return 3_000;
+  if (t === 'airport') return 4_000;
+  if (t === 'island') return 15_000;
+  if (t === 'poi' || t === 'landmark') return 800;
+  return 1_000;
+}
+
+// Merge local (instant) and remote (Photon) suggestions, deduplicating by label.
+// Local results come first so they never get pushed out by remote duplicates.
+function _acMerge(local, remote) {
+  const seen = new Set(local.map((s) => s.label.toLowerCase()));
+  const merged = [...local];
+  for (const r of remote) {
+    if (!seen.has(r.label.toLowerCase())) {
+      merged.push(r);
+      seen.add(r.label.toLowerCase());
+    }
+    if (merged.length >= 7) break;
+  }
+  return merged;
+}
+
+// ── Local instant-search index ────────────────────────────────────────────────
+// Built once at module load. Entries with `locationId` use the preset fly path
+// (instant, no geocode); entries with lat/lon use flyToLandmark.
+// `tokens` are lowercase search strings — any token prefix-match triggers a hit.
+function _buildLocalSearchIndex() {
+  const entries = [];
+
+  // CITY_POIS presets — instant camera fly, hand-tuned framing
+  for (const [cityId, city] of Object.entries(CITY_POIS)) {
+    const first = city.pois[0];
+    const cityTokens = [city.name.toLowerCase(), cityId];
+    entries.push({ label: city.name, sub: '', lat: first.lat, lon: first.lon, type: 'city', locationId: cityId, tokens: cityTokens });
+    for (const poi of city.pois) {
+      const words = poi.name.toLowerCase().split(/[\s/,]+/).filter((w) => w.length > 1);
+      entries.push({ label: poi.name, sub: city.name, lat: poi.lat, lon: poi.lon, type: 'poi', tokens: [poi.name.toLowerCase(), ...words] });
+    }
+  }
+
+  // Philippines — cities, landmarks, malls
+  const PH = [
+    { label: 'Manila', sub: 'Philippines', lat: 14.5995, lon: 120.9842, type: 'city', tokens: ['manila', 'maynila'] },
+    { label: 'Cebu City', sub: 'Cebu, Philippines', lat: 10.3157, lon: 123.8854, type: 'city', tokens: ['cebu', 'cebu city'] },
+    { label: 'Davao City', sub: 'Davao del Sur, Philippines', lat: 7.1907, lon: 125.4553, type: 'city', tokens: ['davao', 'davao city'] },
+    { label: 'Quezon City', sub: 'Metro Manila, Philippines', lat: 14.6760, lon: 121.0437, type: 'city', tokens: ['quezon city', 'qc', 'quezon'] },
+    { label: 'Makati', sub: 'Metro Manila, Philippines', lat: 14.5547, lon: 121.0244, type: 'city', tokens: ['makati'] },
+    { label: 'Bonifacio Global City', sub: 'Taguig, Metro Manila', lat: 14.5490, lon: 121.0507, type: 'city', tokens: ['bgc', 'bonifacio', 'bonifacio global city', 'the fort', 'fort bonifacio'] },
+    { label: 'Ortigas Center', sub: 'Pasig, Metro Manila', lat: 14.5873, lon: 121.0615, type: 'neighbourhood', tokens: ['ortigas', 'ortigas center'] },
+    { label: 'Zamboanga City', sub: 'Zamboanga Peninsula, Philippines', lat: 6.9214, lon: 122.0790, type: 'city', tokens: ['zamboanga', 'zamboanga city'] },
+    { label: 'Cagayan de Oro', sub: 'Misamis Oriental, Philippines', lat: 8.4542, lon: 124.6319, type: 'city', tokens: ['cdo', 'cagayan de oro', 'cagayan'] },
+    { label: 'General Santos', sub: 'South Cotabato, Philippines', lat: 6.1164, lon: 125.1716, type: 'city', tokens: ['gensan', 'general santos', 'gen san'] },
+    { label: 'Iloilo City', sub: 'Western Visayas, Philippines', lat: 10.7202, lon: 122.5621, type: 'city', tokens: ['iloilo', 'iloilo city'] },
+    { label: 'Bacolod', sub: 'Negros Occidental, Philippines', lat: 10.6407, lon: 122.9457, type: 'city', tokens: ['bacolod'] },
+    { label: 'Tacloban', sub: 'Leyte, Philippines', lat: 11.2543, lon: 125.0040, type: 'city', tokens: ['tacloban'] },
+    { label: 'Baguio', sub: 'Benguet, Philippines', lat: 16.4023, lon: 120.5960, type: 'city', tokens: ['baguio', 'baguio city'] },
+    { label: 'Vigan', sub: 'Ilocos Sur, Philippines', lat: 17.5747, lon: 120.3869, type: 'city', tokens: ['vigan'] },
+    { label: 'Legazpi', sub: 'Albay, Philippines', lat: 13.1391, lon: 123.7438, type: 'city', tokens: ['legazpi', 'legazpi city'] },
+    { label: 'Naga City', sub: 'Camarines Sur, Philippines', lat: 13.6218, lon: 123.1945, type: 'city', tokens: ['naga', 'naga city'] },
+    { label: 'Boracay Island', sub: 'Aklan, Philippines', lat: 11.9674, lon: 121.9248, type: 'island', tokens: ['boracay'] },
+    { label: 'El Nido', sub: 'Palawan, Philippines', lat: 11.1832, lon: 119.4012, type: 'city', tokens: ['el nido', 'elnido', 'palawan'] },
+    { label: 'Coron', sub: 'Palawan, Philippines', lat: 12.0022, lon: 120.2042, type: 'city', tokens: ['coron'] },
+    { label: 'Puerto Princesa', sub: 'Palawan, Philippines', lat: 9.7392, lon: 118.7353, type: 'city', tokens: ['puerto princesa', 'palawan city'] },
+    { label: 'Siargao Island', sub: 'Surigao del Norte, Philippines', lat: 9.8482, lon: 126.0458, type: 'island', tokens: ['siargao'] },
+    { label: 'Panglao', sub: 'Bohol, Philippines', lat: 9.5807, lon: 123.7645, type: 'city', tokens: ['panglao', 'bohol'] },
+    { label: 'Tagaytay', sub: 'Cavite, Philippines', lat: 14.1153, lon: 120.9621, type: 'city', tokens: ['tagaytay'] },
+    { label: 'Clark Freeport Zone', sub: 'Pampanga, Philippines', lat: 15.1797, lon: 120.5400, type: 'neighbourhood', tokens: ['clark', 'clark freeport', 'clark field'] },
+    { label: 'Subic Bay', sub: 'Olongapo, Philippines', lat: 14.7942, lon: 120.2692, type: 'neighbourhood', tokens: ['subic', 'subic bay'] },
+    { label: 'Intramuros', sub: 'Manila, Philippines', lat: 14.5893, lon: 120.9750, type: 'neighbourhood', tokens: ['intramuros'] },
+    { label: 'Rizal Park', sub: 'Manila, Philippines', lat: 14.5828, lon: 120.9783, type: 'park', tokens: ['rizal park', 'luneta', 'luneta park'] },
+    { label: 'Fort Santiago', sub: 'Intramuros, Manila', lat: 14.5925, lon: 120.9700, type: 'attraction', tokens: ['fort santiago'] },
+    { label: 'NAIA Airport', sub: 'Pasay, Metro Manila', lat: 14.5086, lon: 121.0194, type: 'airport', tokens: ['naia', 'naia airport', 'ninoy aquino', 'manila airport', 'mia'] },
+    { label: 'SM Mall of Asia', sub: 'Pasay, Metro Manila', lat: 14.5353, lon: 120.9836, type: 'mall', tokens: ['moa', 'mall of asia', 'sm mall of asia'] },
+    { label: 'Greenbelt', sub: 'Makati, Metro Manila', lat: 14.5508, lon: 121.0222, type: 'mall', tokens: ['greenbelt'] },
+    { label: 'Glorietta', sub: 'Makati, Metro Manila', lat: 14.5520, lon: 121.0196, type: 'mall', tokens: ['glorietta'] },
+    { label: 'SM Megamall', sub: 'Mandaluyong, Metro Manila', lat: 14.5858, lon: 121.0569, type: 'mall', tokens: ['megamall', 'sm megamall'] },
+    { label: 'TriNoma', sub: 'Quezon City, Metro Manila', lat: 14.6560, lon: 121.0308, type: 'mall', tokens: ['trinoma', 'sm north edsa', 'north edsa'] },
+    { label: 'Rockwell Center', sub: 'Makati, Metro Manila', lat: 14.5641, lon: 121.0327, type: 'neighbourhood', tokens: ['rockwell'] },
+    { label: 'Divisoria', sub: 'Manila, Philippines', lat: 14.5993, lon: 120.9682, type: 'neighbourhood', tokens: ['divisoria'] },
+    { label: 'Binondo', sub: 'Manila, Philippines', lat: 14.5996, lon: 120.9761, type: 'neighbourhood', tokens: ['binondo', 'chinatown manila'] },
+    { label: 'EDSA', sub: 'Metro Manila, Philippines', lat: 14.6181, lon: 121.0531, type: 'neighbourhood', tokens: ['edsa'] },
+  ];
+
+  // Major world cities
+  const WORLD = [
+    { label: 'Singapore', sub: 'Singapore', lat: 1.3521, lon: 103.8198, type: 'city', tokens: ['singapore'] },
+    { label: 'Bangkok', sub: 'Thailand', lat: 13.7563, lon: 100.5018, type: 'city', tokens: ['bangkok', 'krung thep'] },
+    { label: 'Seoul', sub: 'South Korea', lat: 37.5665, lon: 126.9780, type: 'city', tokens: ['seoul'] },
+    { label: 'Beijing', sub: 'China', lat: 39.9042, lon: 116.4074, type: 'city', tokens: ['beijing', 'peking'] },
+    { label: 'Shanghai', sub: 'China', lat: 31.2304, lon: 121.4737, type: 'city', tokens: ['shanghai'] },
+    { label: 'Hong Kong', sub: 'China SAR', lat: 22.3193, lon: 114.1694, type: 'city', tokens: ['hong kong', 'hk', 'hongkong'] },
+    { label: 'Kuala Lumpur', sub: 'Malaysia', lat: 3.1390, lon: 101.6869, type: 'city', tokens: ['kuala lumpur', 'kl'] },
+    { label: 'Jakarta', sub: 'Indonesia', lat: -6.2088, lon: 106.8456, type: 'city', tokens: ['jakarta'] },
+    { label: 'Taipei', sub: 'Taiwan', lat: 25.0330, lon: 121.5654, type: 'city', tokens: ['taipei', 'taiwan'] },
+    { label: 'Ho Chi Minh City', sub: 'Vietnam', lat: 10.8231, lon: 106.6297, type: 'city', tokens: ['ho chi minh', 'saigon', 'hcmc'] },
+    { label: 'Hanoi', sub: 'Vietnam', lat: 21.0285, lon: 105.8542, type: 'city', tokens: ['hanoi'] },
+    { label: 'Mumbai', sub: 'India', lat: 19.0760, lon: 72.8777, type: 'city', tokens: ['mumbai', 'bombay'] },
+    { label: 'New Delhi', sub: 'India', lat: 28.6139, lon: 77.2090, type: 'city', tokens: ['new delhi', 'delhi'] },
+    { label: 'Sydney', sub: 'Australia', lat: -33.8688, lon: 151.2093, type: 'city', tokens: ['sydney'] },
+    { label: 'Melbourne', sub: 'Australia', lat: -37.8136, lon: 144.9631, type: 'city', tokens: ['melbourne'] },
+    { label: 'Los Angeles', sub: 'California, USA', lat: 34.0522, lon: -118.2437, type: 'city', tokens: ['los angeles', 'la', 'l.a.'] },
+    { label: 'Chicago', sub: 'Illinois, USA', lat: 41.8781, lon: -87.6298, type: 'city', tokens: ['chicago'] },
+    { label: 'Miami', sub: 'Florida, USA', lat: 25.7617, lon: -80.1918, type: 'city', tokens: ['miami'] },
+    { label: 'Toronto', sub: 'Ontario, Canada', lat: 43.6532, lon: -79.3832, type: 'city', tokens: ['toronto'] },
+    { label: 'Vancouver', sub: 'British Columbia, Canada', lat: 49.2827, lon: -123.1207, type: 'city', tokens: ['vancouver'] },
+    { label: 'Berlin', sub: 'Germany', lat: 52.5200, lon: 13.4050, type: 'city', tokens: ['berlin'] },
+    { label: 'Rome', sub: 'Italy', lat: 41.9028, lon: 12.4964, type: 'city', tokens: ['rome', 'roma'] },
+    { label: 'Madrid', sub: 'Spain', lat: 40.4168, lon: -3.7038, type: 'city', tokens: ['madrid'] },
+    { label: 'Amsterdam', sub: 'Netherlands', lat: 52.3676, lon: 4.9041, type: 'city', tokens: ['amsterdam'] },
+    { label: 'Istanbul', sub: 'Turkey', lat: 41.0082, lon: 28.9784, type: 'city', tokens: ['istanbul', 'constantinople'] },
+    { label: 'Moscow', sub: 'Russia', lat: 55.7558, lon: 37.6176, type: 'city', tokens: ['moscow', 'moskva'] },
+    { label: 'Cairo', sub: 'Egypt', lat: 30.0444, lon: 31.2357, type: 'city', tokens: ['cairo'] },
+    { label: 'Nairobi', sub: 'Kenya', lat: -1.2921, lon: 36.8219, type: 'city', tokens: ['nairobi'] },
+    { label: 'Johannesburg', sub: 'South Africa', lat: -26.2041, lon: 28.0473, type: 'city', tokens: ['johannesburg', 'joburg', 'jozi'] },
+    { label: 'Riyadh', sub: 'Saudi Arabia', lat: 24.7136, lon: 46.6753, type: 'city', tokens: ['riyadh'] },
+    { label: 'Abu Dhabi', sub: 'UAE', lat: 24.4539, lon: 54.3773, type: 'city', tokens: ['abu dhabi'] },
+    { label: 'Mexico City', sub: 'Mexico', lat: 19.4326, lon: -99.1332, type: 'city', tokens: ['mexico city', 'cdmx', 'df'] },
+    { label: 'São Paulo', sub: 'Brazil', lat: -23.5505, lon: -46.6333, type: 'city', tokens: ['sao paulo', 'são paulo'] },
+    { label: 'Buenos Aires', sub: 'Argentina', lat: -34.6037, lon: -58.3816, type: 'city', tokens: ['buenos aires'] },
+  ];
+
+  for (const s of [...PH, ...WORLD]) {
+    entries.push({ ...s, extent: null });
+  }
+  return entries;
+}
+
+// Flat array searched on every keystroke — built once, never mutated.
+const LOCAL_SEARCH_INDEX = _buildLocalSearchIndex();
+
+// Filter the local index by prefix or substring match against any token.
+// Returns up to `limit` results, city/poi types ranked first.
+function _acSearchLocal(q, limit = 5) {
+  const qLow = q.toLowerCase().trim();
+  if (!qLow) return [];
+  const exact = [];
+  const partial = [];
+  for (const entry of LOCAL_SEARCH_INDEX) {
+    let matched = false;
+    for (const token of entry.tokens) {
+      if (token.startsWith(qLow)) { exact.push(entry); matched = true; break; }
+    }
+    if (!matched) {
+      for (const token of entry.tokens) {
+        if (token.includes(qLow)) { partial.push(entry); break; }
+      }
+    }
+    if (exact.length + partial.length >= limit * 3) break; // enough candidates
+  }
+  return [...exact, ...partial].slice(0, limit);
+}
+
 const TRANSITION_DURATION_MS = 500;
 /** Map of style name to its GLSL shader module for post-process stages. */
 const STYLES = { retro: retroShader, surveillance: nightVisionShader, thermal: thermalShader, anime: animeShader, noir: noirShader, snow: snowShader };
@@ -2368,6 +2560,11 @@ export class StyleManager {
     this._toast = document.getElementById('toast');
     this._locationSearch = document.getElementById('location-search');
     this._searchToggle = document.getElementById('search-toggle');
+    this._searchSuggestions = document.getElementById('search-suggestions');
+    this._acSuggestions = [];   // [{label,sub,lat,lon,type,extent}]
+    this._acActiveIndex = -1;   // keyboard-selected suggestion index
+    this._acDebounceTimer = null;
+    this._acPhotonAbort = null; // AbortController for in-flight Photon request
     this._locationPills = document.getElementById('location-pills');
     this._poiRow = document.getElementById('poi-row');
     this._locationBarDivider = document.getElementById('location-bar-divider');
@@ -2805,6 +3002,7 @@ export class StyleManager {
   _settleLocationSearchUi(generation) {
     if (this._activeLocationSearchGeneration !== generation) return;
     this._activeLocationSearchGeneration = null;
+    this._acHide();
     this._locationSearch?.classList.remove('searching', 'expanded');
     if (this._locationSearch) this._locationSearch.value = '';
     this._locationSearch?.blur();
@@ -3346,6 +3544,7 @@ export class StyleManager {
       if (keyMap[e.key]) this.setStyle(keyMap[e.key]);
       if (e.key === 'Escape') {
         if (this._locationSearch.classList.contains('expanded')) {
+          this._acHide();
           this._locationSearch.classList.remove('expanded');
           this._locationSearch.value = '';
           this._locationSearch.blur();
@@ -9280,55 +9479,238 @@ export class StyleManager {
       this._locationSearch.classList.toggle('expanded');
       if (this._locationSearch.classList.contains('expanded')) {
         this._locationSearch.focus();
+      } else {
+        this._acHide();
+        this._locationSearch.value = '';
       }
     });
 
-    // Search submit on Enter
-    this._locationSearch.addEventListener('keydown', async (e) => {
-      if (e.key === 'Enter') {
-        const query = this._locationSearch.value.trim();
-        if (!query) return;
-        const generation = this._beginDeferredNavigation('location');
-        if (generation === false) {
-          this._locationSearch.classList.remove('searching');
-          this._locationSearch.blur();
-          return;
-        }
-        this._activeLocationSearchGeneration = generation;
-        this._locationSearch.classList.add('searching');
-        try {
-          const destination = await searchAndFlyTo(this.viewer, query, {
-            beforeFly: () => this._reassertNavigationHandoff(generation),
-          });
-          if (this._disposed || generation !== this._navigationGeneration) return;
-          if (destination?.cancelled) {
-            // Authority changed while the lookup was resolving; remain inert.
-          } else if (destination) {
-            // The ACTIVE STYLE indicator reports the STYLE and nothing else.
-            // Writing the searched city here made the top-right corner read
-            // "ACTIVE STYLE / TOKYO"; where the camera is belongs to the
-            // LOCATION panel's own readout, which is updated below.
-            //
-            // Set before _setActiveLocation(null) so its own mini-status
-            // refresh already sees the destination — the readout never blinks
-            // through "Location: --" on the way to the searched place.
-            this._searchedLocationLabel = destination.label || query;
-            this._setActiveLocation(null);
-            this._currentPoi = null;
-            this._collapsePOIRow();
-            this._updateLocationMiniStatus();
-          } else {
-            this._showToast('Location not found');
-          }
-        } catch (err) {
-          console.error('[Search] Geocoding failed:', err);
-          if (this._disposed || generation !== this._navigationGeneration) return;
-          this._showToast('Search failed');
-        } finally {
-          this._settleLocationSearchUi(generation);
-        }
+    // Autocomplete: local results are instant (0 ms); Photon augments after 180 ms.
+    this._locationSearch.addEventListener('input', () => {
+      clearTimeout(this._acDebounceTimer);
+      this._acPhotonAbort?.abort();
+      const q = this._locationSearch.value.trim();
+      if (!q) { this._acHide(); return; }
+      // Immediately show local hits — no network, no debounce.
+      const local = _acSearchLocal(q);
+      if (local.length) {
+        this._acSuggestions = local;
+        this._acActiveIndex = -1;
+        this._acRender();
+      }
+      // After 180 ms, augment with Photon results (handles obscure / long-tail places).
+      if (q.length >= 2) {
+        this._acDebounceTimer = setTimeout(() => this._acFetchPhoton(q, local), 180);
       }
     });
+
+    // Keyboard navigation within the dropdown + Enter to submit
+    this._locationSearch.addEventListener('keydown', async (e) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        this._acMove(1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        this._acMove(-1);
+        return;
+      }
+      if (e.key === 'Escape') {
+        this._acHide();
+        return;
+      }
+      if (e.key === 'Enter') {
+        // If a suggestion is keyboard-selected, navigate to it directly.
+        if (this._acActiveIndex >= 0 && this._acSuggestions[this._acActiveIndex]) {
+          e.preventDefault();
+          this._acSelect(this._acSuggestions[this._acActiveIndex]);
+          return;
+        }
+        // Otherwise geocode whatever is typed.
+        const query = this._locationSearch.value.trim();
+        if (!query) return;
+        this._acHide();
+        await this._searchNavigate(query);
+      }
+    });
+
+    // Hide dropdown on blur (small delay so click on suggestion registers first)
+    this._locationSearch.addEventListener('blur', () => {
+      setTimeout(() => this._acHide(), 150);
+    });
+  }
+
+  // ── Autocomplete helpers ─────────────────────────────────────────────────
+
+  async _acFetchPhoton(q, localResults = []) {
+    if (this._disposed) return;
+    this._acPhotonAbort?.abort();
+    const ctrl = new AbortController();
+    this._acPhotonAbort = ctrl;
+    try {
+      const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(q)}`, {
+        signal: ctrl.signal,
+      });
+      if (ctrl.signal.aborted || this._disposed) return;
+      const data = await res.json().catch(() => ({ suggestions: [] }));
+      const remote = Array.isArray(data.suggestions) ? data.suggestions : [];
+      // Merge local (instant, shown first) with remote (Photon extras).
+      const merged = _acMerge(localResults, remote);
+      if (merged.length > 0) {
+        this._acSuggestions = merged;
+        this._acActiveIndex = -1;
+        this._acRender();
+      } else {
+        this._acHide();
+      }
+    } catch (e) {
+      if (e?.name !== 'AbortError') { /* network error — local results stay visible */ }
+    }
+  }
+
+  _acRender() {
+    if (!this._searchSuggestions) return;
+    const hasSuggestions = this._acSuggestions.length > 0
+      && this._locationSearch?.classList.contains('expanded');
+    if (!hasSuggestions) { this._acHide(); return; }
+
+    this._searchSuggestions.innerHTML = '';
+    this._acSuggestions.forEach((s, i) => {
+      const icon = _acIcon(s.type);
+      const item = document.createElement('div');
+      item.className = 'search-suggestion';
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', 'false');
+      item.innerHTML = `<span class="search-suggestion-icon" aria-hidden="true">${icon}</span><span class="search-suggestion-text"><span class="search-suggestion-label"></span>${s.sub ? '<span class="search-suggestion-sub"></span>' : ''}</span>`;
+      item.querySelector('.search-suggestion-label').textContent = s.label;
+      const subEl = item.querySelector('.search-suggestion-sub');
+      if (subEl) subEl.textContent = s.sub;
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // prevent blur before click fires
+        this._acSelect(s);
+      });
+      this._searchSuggestions.appendChild(item);
+    });
+    this._searchSuggestions.classList.add('visible');
+    this._locationSearch?.setAttribute('aria-expanded', 'true');
+  }
+
+  _acHide() {
+    // State resets must run even if the DOM element is absent (e.g. during init
+    // or after dispose), so they come before the element guard.
+    clearTimeout(this._acDebounceTimer);
+    this._acDebounceTimer = null;
+    this._acPhotonAbort?.abort();
+    this._acPhotonAbort = null;
+    this._acSuggestions = [];
+    this._acActiveIndex = -1;
+    if (!this._searchSuggestions) return;
+    this._searchSuggestions.classList.remove('visible');
+    this._searchSuggestions.innerHTML = '';
+    this._locationSearch?.setAttribute('aria-expanded', 'false');
+  }
+
+  _acMove(delta) {
+    if (!this._acSuggestions.length) return;
+    const items = this._searchSuggestions?.querySelectorAll('.search-suggestion') || [];
+    if (items[this._acActiveIndex]) items[this._acActiveIndex].classList.remove('ac-active');
+    this._acActiveIndex = Math.max(-1, Math.min(
+      this._acSuggestions.length - 1,
+      this._acActiveIndex + delta,
+    ));
+    if (this._acActiveIndex >= 0 && items[this._acActiveIndex]) {
+      items[this._acActiveIndex].classList.add('ac-active');
+      items[this._acActiveIndex].scrollIntoView({ block: 'nearest' });
+      // Fill input with selected label so the user can see what will be searched
+      this._locationSearch.value = this._acSuggestions[this._acActiveIndex].label;
+    }
+  }
+
+  async _acSelect(suggestion) {
+    this._acHide();
+    const { lat, lon, label, sub, type, extent, locationId } = suggestion;
+    const displayLabel = sub ? `${label}, ${sub}` : label;
+
+    // CITY_POIS presets use the hand-tuned camera pose — no geocode, no flyToLandmark.
+    if (locationId && CITY_POIS[locationId]) {
+      this._locationSearch.value = displayLabel;
+      const generation = this._beginDeferredNavigation('location');
+      if (generation === false) return;
+      this._activeLocationSearchGeneration = generation;
+      try {
+        flyToPresetLocation(this.viewer, locationId, { viewMode: 'overview', duration: 2.2 });
+        this._searchedLocationLabel = displayLabel;
+        this._setActiveLocation(locationId);
+        this._currentPoi = null;
+        this._updateLocationMiniStatus?.();
+      } finally {
+        this._settleLocationSearchUi(generation);
+      }
+      return;
+    }
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      await this._searchNavigate(displayLabel);
+      return;
+    }
+
+    const generation = this._beginDeferredNavigation('location');
+    if (generation === false) return;
+    this._activeLocationSearchGeneration = generation;
+    this._locationSearch.value = displayLabel;
+    this._locationSearch.classList.add('searching');
+    try {
+      const range = _acRange(type, extent);
+      flyToLandmark(this.viewer, lat, lon, {
+        range,
+        pitch: range > 80000 ? -75 : -35,
+        heading: 0,
+        buildingHeight: 0,
+        duration: 2.2,
+      });
+      this._searchedLocationLabel = displayLabel;
+      this._setActiveLocation(null);
+      this._currentPoi = null;
+      this._collapsePOIRow?.();
+      this._updateLocationMiniStatus?.();
+    } finally {
+      this._settleLocationSearchUi(generation);
+    }
+  }
+
+  async _searchNavigate(query) {
+    const generation = this._beginDeferredNavigation('location');
+    if (generation === false) {
+      this._locationSearch.classList.remove('searching');
+      this._locationSearch.blur();
+      return;
+    }
+    this._activeLocationSearchGeneration = generation;
+    this._locationSearch.classList.add('searching');
+    try {
+      const destination = await searchAndFlyTo(this.viewer, query, {
+        beforeFly: () => this._reassertNavigationHandoff(generation),
+      });
+      if (this._disposed || generation !== this._navigationGeneration) return;
+      if (destination?.cancelled) {
+        // Authority changed while the lookup was resolving; remain inert.
+      } else if (destination) {
+        this._searchedLocationLabel = destination.label || query;
+        this._setActiveLocation(null);
+        this._currentPoi = null;
+        this._collapsePOIRow?.();
+        this._updateLocationMiniStatus?.();
+      } else {
+        this._showToast('Location not found');
+      }
+    } catch (err) {
+      console.error('[Search] Geocoding failed:', err);
+      if (this._disposed || generation !== this._navigationGeneration) return;
+      this._showToast('Search failed');
+    } finally {
+      this._settleLocationSearchUi(generation);
+    }
   }
 
   /**
@@ -10242,6 +10624,18 @@ export class StyleManager {
     }
     clearTimeout(this._adaptivePanelSettleTimer);
     this._adaptivePanelSettleTimer = null;
+    clearTimeout(this._trafficTransitionTimer);
+    this._trafficTransitionTimer = null;
+    clearTimeout(this._toastTimer);
+    this._toastTimer = null;
+    clearTimeout(this._cctvChipHideTimer);
+    this._cctvChipHideTimer = null;
+    clearInterval(this._cctvSummaryTypingTimer);
+    this._cctvSummaryTypingTimer = null;
+    clearTimeout(this._acDebounceTimer);
+    this._acDebounceTimer = null;
+    this._acPhotonAbort?.abort();
+    this._acPhotonAbort = null;
     this._leftStackResizeObserver?.disconnect();
     this._leftStackResizeObserver = null;
     this._leftStackMutationObserver?.disconnect();

@@ -242,12 +242,19 @@ test('validated voice camera destinations share the UI navigation authority faca
   assert.match(voice, /\(lat, lon\) => cachedGroundFloor\(lat, lon\),[\s\S]{0,200}?\(cells\) => warmGroundFloor\(cells\),/);
 });
 
-test('deferred search releases only after its final authority check', () => {
+/** Free-text search: the Enter handler delegates to the shared _searchNavigate. */
+function searchNavigate() {
   const handler = body(
     ui,
     /this\._locationSearch\.addEventListener\('keydown', async \(e\) => \{([\s\S]*?)\n    \}\);/,
     'search handler',
   );
+  assert.match(handler, /await this\._searchNavigate\(query\);/, 'Enter must route through _searchNavigate');
+  return body(ui, /\n  async _searchNavigate\(query\) \{([\s\S]*?)\n  \}/, 'search navigate');
+}
+
+test('deferred search releases only after its final authority check', () => {
+  const handler = searchNavigate();
   ordered(handler, [
     "this._beginDeferredNavigation('location')",
     'this._activeLocationSearchGeneration = generation;',
@@ -344,11 +351,7 @@ test('teardown refuses deferred location work before geocoding begins', () => {
   );
   assert.match(deferred, /disposed: this\._disposed/);
 
-  const handler = body(
-    ui,
-    /this\._locationSearch\.addEventListener\('keydown', async \(e\) => \{([\s\S]*?)\n    \}\);/,
-    'search handler',
-  );
+  const handler = searchNavigate();
   ordered(handler, [
     "const generation = this._beginDeferredNavigation('location');",
     'if (generation === false)',
@@ -356,6 +359,30 @@ test('teardown refuses deferred location work before geocoding begins', () => {
     'searchAndFlyTo(this.viewer, query',
   ], 'disposed search refusal');
   assert.match(handler, /if \(generation === false\) \{[\s\S]*?return;[\s\S]*?\}\s*this\._activeLocationSearchGeneration/);
+});
+
+test('autocomplete selections take the same deferred-navigation authority before flying', () => {
+  const select = body(ui, /\n  async _acSelect\(suggestion\) \{([\s\S]*?)\n  \}/, 'autocomplete select');
+  // Preset city: generation first, refusal returns, settle in finally.
+  ordered(select, [
+    "const generation = this._beginDeferredNavigation('location');",
+    'if (generation === false) return;',
+    'flyToPresetLocation(',
+    'finally',
+    'this._settleLocationSearchUi(generation)',
+  ], 'preset autocomplete');
+  // Suggestions without coordinates fall back to the guarded free-text path.
+  assert.match(select, /await this\._searchNavigate\(displayLabel\);/);
+  // Coordinate suggestion: the second guard precedes the landmark flight.
+  const coord = select.slice(select.lastIndexOf("this._beginDeferredNavigation('location')"));
+  ordered(coord, [
+    "this._beginDeferredNavigation('location')",
+    'if (generation === false) return;',
+    'flyToLandmark(this.viewer',
+    'finally',
+    'this._settleLocationSearchUi(generation)',
+  ], 'coordinate autocomplete');
+  assert.doesNotMatch(select, /_releaseFollowCamera/);
 });
 
 test('refused canned destinations commit no location or POI state', () => {

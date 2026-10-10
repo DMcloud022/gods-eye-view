@@ -331,8 +331,23 @@ export function findPoiByName(query) {
     city.pois.forEach((poi, index) => {
       const name = poiNameTokens(poi.name);
       if (name.size < 2) return; // single-word POI names are too ambiguous to match loosely
+
+      // Full match: all POI name tokens appear in the query — always preferred.
       const fullyNamed = [...name].every((w) => q.has(w));
-      if (fullyNamed && (!best || name.size > best.size)) best = { cityId, index, size: name.size };
+      if (fullyNamed) {
+        if (!best || best.partial || name.size > best.size) {
+          best = { cityId, index, size: name.size, partial: false };
+        }
+        return;
+      }
+
+      // Partial match: all query tokens appear in the POI name and every token is
+      // distinctive (≥6 chars) so generic short words ("tower", "park") alone don't fire.
+      if ([...q].every((w) => name.has(w) && w.length >= 6)) {
+        if (!best || (best.partial && q.size > best.size)) {
+          best = { cityId, index, size: q.size, partial: true };
+        }
+      }
     });
   }
   return best ? { cityId: best.cityId, index: best.index } : null;
@@ -347,20 +362,26 @@ export const CANCELLED_SEARCH = Object.freeze({ cancelled: true });
  * default; precise landmarks/buildings use close landmark framing.
  */
 export async function searchAndFlyTo(viewer, query, options = {}) {
-  const apiKey = window.__GOOGLE_MAPS_API_KEY__ || import.meta.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) throw new Error('No Google Maps API key available for geocoding');
-
   const beforeFly = typeof options.beforeFly === 'function' ? options.beforeFly : null;
   const mayFly = () => beforeFly === null || beforeFly() !== false;
+  const fetchSignal = options.signal ?? AbortSignal.timeout(8000);
 
-  // Viewport-biased geocode — the same bias annotationResolver's geocodePlace uses:
-  // "Sixth Street" spoken over Austin must prefer the Sixth Street on screen, not a
-  // same-named road in another city (or the wrong end of town — the W 6th vs E 6th bug).
-  let url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
+  let url = `/api/geocode?q=${encodeURIComponent(query)}`;
   const bias = viewportBias(viewer);
-  if (bias) url += `&bounds=${bias}`;
-  const response = await fetch(url);
-  const data = await response.json();
+  if (bias) url += `&bounds=${encodeURIComponent(bias)}`;
+  let response;
+  try {
+    response = await fetch(url, { signal: fetchSignal });
+  } catch (e) {
+    if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return CANCELLED_SEARCH;
+    return null;
+  }
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    return null;
+  }
 
   const result = (data.status === 'OK' && data.results?.length) ? data.results[0] : null;
   let lat = result?.geometry.location.lat;

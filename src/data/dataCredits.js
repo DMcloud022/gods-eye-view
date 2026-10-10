@@ -67,6 +67,20 @@ export const DATA_CREDITS = [
     html: 'Earthquakes: Data courtesy of the U.S. Geological Survey',
   },
   {
+    key: 'noaa-alerts',
+    html:
+      'Weather alerts: ' +
+      '<a href="https://www.weather.gov/" target="_blank" rel="noopener">U.S. National Weather Service / NOAA</a> ' +
+      '(api.weather.gov — public domain)',
+  },
+  {
+    key: 'aviation-sigmets',
+    html:
+      'Aviation SIGMETs: ' +
+      '<a href="https://aviationweather.gov/" target="_blank" rel="noopener">NOAA Aviation Weather Center</a> ' +
+      '(aviationweather.gov — public domain)',
+  },
+  {
     key: 'overpass',
     html:
       'Road geometry (traffic): ' +

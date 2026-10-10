@@ -30,9 +30,7 @@ else
   GOOGLE_MAPS_API_KEY=""
 fi
 if [[ -z "${GOOGLE_MAPS_API_KEY}" ]]; then
-  echo "error: Google Maps API key missing."
-  echo "set GOOGLE_MAPS_API_KEY in env, or add Keychain item: service=google-maps-api account=api-key"
-  exit 1
+  echo "notice: No Google Maps API key — Google 3D tiles disabled, using free MapTiler/OSM instead."
 fi
 
 read_keychain_secret() {

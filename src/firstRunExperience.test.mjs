@@ -434,16 +434,14 @@ test('the tile is the FULLY CONFIGURED experience: quakes and fires together', (
   const environmental = FIRST_RUN_MISSIONS.environmental;
   assert.deepEqual(environmental.layerIds, ['earthquakes', 'local-firms']);
 
-  // Keyless, the honest surface is the LAYER ROW ("KEY REQUIRED"), which the
-  // FIRMS layer already reports. The misleading part is the GLOBAL chip folding
-  // that row into LOAD FAILED — a defect in the shared state machine, ledgered
-  // post-launch, and the note must stay where the next editor will read it
-  // rather than being re-discovered as a launcher bug.
-  const module = fs.readFileSync(new URL('./firstRunExperience.js', import.meta.url), 'utf8');
-  const table = module.slice(module.indexOf('  environmental: Object.freeze({'), module.indexOf('  explore:'));
-  assert.match(table, /KEY REQUIRED/);
-  assert.match(table, /src\/loadingFeedback\.js/);
-  assert.match(table, /LEDGERED post-launch/);
+  // Keyless visitors get the same tile because fires no longer need a key:
+  // the FIRMS proxy falls back to NASA EONET, so the build pins
+  // FIRMS_AVAILABLE true. If that define ever becomes key-dependent, the
+  // module's keyless branch would silently drop fires from this tile.
+  const config = fs.readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
+  assert.match(config, /'import\.meta\.env\.FIRMS_AVAILABLE': JSON\.stringify\(true\)/);
+  assert.match(config, /No FIRMS key — use NASA EONET as a free, keyless wildfire fallback/);
+  assert.match(config, /async function fetchEonetFires\(\)/);
 });
 
 test('every visitor gets the same tile — there is no degraded keyless variant', async () => {
@@ -653,10 +651,13 @@ test('the voice TOOL SCHEMA is byte-identical to main — the mission mapping is
   const end = src.indexOf('\n];\n', start);
   const block = src.slice(start, end + 4);
 
-  assert.equal(block.length, 31104, 'tool schema byte length drifted from the frozen baseline');
+  // Re-baselined for the deliberate schema edits (weather + military layer
+  // enums, MapTiler/Esri/CARTO basemaps, user-facing context modes) — pinned
+  // per tool in radioMarkup.test.mjs. The missions still add no schema.
+  assert.equal(block.length, 31946, 'tool schema byte length drifted from the frozen baseline');
   assert.equal(
     crypto.createHash('sha256').update(block).digest('hex'),
-    '3ace199727934e851902e4899c423d549d34d3f53469dcb56f07fc070d3f9d66',
+    '95719c1ecdfde4ad911c040553b9c3b130d24883ea7a3c0e3ffec0f2965a6d35',
     'the first-run missions must ride EXISTING tools: no schema edit, no cache bust',
   );
 
@@ -678,6 +679,10 @@ test('the voice TOOL SCHEMA is byte-identical to main — the mission mapping is
   }
   assert.ok(paragraph.includes('zoom_to_globe'));
   assert.ok(paragraph.includes('set_layer_visibility'));
+  // The weather view rides the same existing tools.
+  for (const layerId of ['noaa-alerts', 'aviation-sigmets']) {
+    assert.ok(paragraph.includes(layerId), `weather view must name the existing ${layerId} enum value`);
+  }
 });
 
 test('every layer a mission drives is already in the shipped set_layer_visibility enum', () => {

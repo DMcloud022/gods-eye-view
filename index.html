@@ -3,11 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#080c14" />
+  <meta name="description" content="God's Eye View — cinematic real-time intelligence globe with live flights, vessels, satellites, earthquakes, and AI voice control." />
+  <meta property="og:title" content="God's Eye View" />
+  <meta property="og:description" content="Cinematic real-time intelligence globe — live data, AI voice, 3D terrain." />
+  <meta property="og:type" content="website" />
   <title>God's Eye View</title>
   <link rel="icon" type="image/svg+xml" href="/logo.svg" />
   <link rel="stylesheet" href="/style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://tile.googleapis.com" crossorigin />
+  <link rel="preconnect" href="https://maps.googleapis.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet" />
@@ -478,7 +485,7 @@
   <button id="clean-view-exit" title="Return UI controls">EXIT CLEAN VIEW</button>
 
   <!-- Unified bottom command dock: locations, voice (injected at runtime), visual presets -->
-  <div id="command-dock" aria-label="Navigation, voice, and visual preset controls">
+  <div id="command-dock" role="region" aria-label="Navigation, voice, and visual preset controls">
   <!-- Control panel -->
   <div id="control-panel" class="panel-collapsible collapsed">
     <div class="panel-glow"></div>
@@ -562,10 +569,11 @@
         <div class="location-city-row">
           <div id="location-pills" class="location-pills"></div>
           <div class="location-search-wrap">
-            <button id="search-toggle" class="search-toggle-btn" title="Search any location">
+            <button id="search-toggle" class="search-toggle-btn" type="button" title="Search any location" aria-label="Toggle location search">
               <span>&#x1F50E;</span>
             </button>
-            <input type="text" id="location-search" placeholder="Search any location..." autocomplete="off" spellcheck="false" />
+            <input type="text" id="location-search" placeholder="Search any location..." aria-label="Search any location" autocomplete="off" spellcheck="false" aria-autocomplete="list" aria-controls="search-suggestions" aria-haspopup="listbox" role="combobox" aria-expanded="false" />
+            <div id="search-suggestions" role="listbox" aria-label="Location suggestions"></div>
           </div>
         </div>
       </div>
@@ -886,7 +894,7 @@
   <div id="intel-hud"></div>
 
   <!-- Loading screen -->
-  <div id="loading-screen">
+  <div id="loading-screen" role="status" aria-live="polite" aria-label="Loading God's Eye View">
     <div class="loader-content">
       <span class="loader-logo brand-logo" data-logo-gaze data-logo-src="/logo.svg" aria-hidden="true"><img src="/logo.svg" alt="" /></span>
       <h2>GOD'S EYE <span class="title-accent">VIEW</span></h2>
