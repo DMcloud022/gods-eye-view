@@ -1,5 +1,4 @@
 import * as Cesium from 'cesium';
-import { createGevActionRunner } from './gevActions.js';
 
 const WEB_VOICE_STATUS = {
   idle: 'OFF',
@@ -379,11 +378,4 @@ export class GevWebVoiceController {
   bindPushToTalkShortcut() {}
   toggleVoiceTier() {}
   notifyMapEvent() {}
-}
-
-export function createGevWebVoiceController({
-  viewer, styleManager, dataManager, sceneDirector = null, annotations = null, ui,
-}) {
-  const runner = createGevActionRunner({ viewer, styleManager, dataManager, sceneDirector, annotations });
-  return new GevWebVoiceController({ runner, ui });
 }

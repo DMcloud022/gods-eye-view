@@ -709,17 +709,16 @@ check({
 });
 
 check({
-  id: 'A9', group: 'A', desc: '.env.example documents LAN opt-in + the cost-control throttles',
+  id: 'A9', group: 'A', desc: '.env.example documents LAN opt-in + the cost-control throttle',
   run: async () => {
     const t = readFileSync(resolve(REPO_ROOT, '.env.example'), 'utf8');
     const bits = {
       lan: /HOST=0\.0\.0\.0/.test(t),
-      google: /GEV_RATELIMIT_GOOGLE_PER_MIN/.test(t),
       openai: /GEV_RATELIMIT_OPENAI_PER_MIN/.test(t),
       notBilling: /not.*billing cap|billing cap/i.test(t),
     };
     const bad = Object.entries(bits).filter(([, v]) => !v).map(([k]) => k);
-    return bad.length === 0 ? pass('LAN opt-in + both throttles + the not-a-billing-cap caveat') : fail(`missing: ${bad.join(', ')}`);
+    return bad.length === 0 ? pass('LAN opt-in + the OpenAI throttle + the not-a-billing-cap caveat') : fail(`missing: ${bad.join(', ')}`);
   },
 });
 

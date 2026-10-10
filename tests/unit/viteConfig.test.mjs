@@ -7,6 +7,7 @@
  *   integration suite, so new endpoints can't ship untested.
  * - Only browser-scoped keys are injected into the client bundle.
  * - The dev server defaults to localhost.
+ * - The same-origin /api guard runs before every other plugin.
  * - The built bundle contains no server-side secret patterns.
  */
 import { test } from 'node:test';
@@ -76,4 +77,9 @@ test('built bundle contains no server-side secret patterns', (t) => {
     }
   }
   assert.deepEqual(hits, [], `possible secrets in bundle:\n${hits.join('\n')}`);
+});
+
+test('same-origin API guard is registered before every other plugin', () => {
+  const plugins = CONFIG.match(/plugins:\s*\[\s*([a-zA-Z]+)\(/)?.[1];
+  assert.equal(plugins, 'sameOriginApiGuard');
 });

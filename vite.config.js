@@ -459,16 +459,10 @@ function makeOptInRateLimiter(envValue) {
 // configured via .env. Building on first request (like the OPENAI_API_KEY reads) sees the loaded env;
 // the result is cached so the limiter's per-IP window state persists. `null` = unlimited (default).
 let _openAiRateLimiter; // undefined = not built yet; null = unlimited; fn = active limiter
-let _googleRateLimiter;
 /** OpenAI cost endpoints (realtime/token + hud-summary). Null = unlimited (default). */
 function openAiRateLimiter() {
   if (_openAiRateLimiter === undefined) _openAiRateLimiter = makeOptInRateLimiter(process.env.GEV_RATELIMIT_OPENAI_PER_MIN);
   return _openAiRateLimiter;
-}
-/** Google cost endpoint (nearby-places). Null = unlimited (default). */
-function googleRateLimiter() {
-  if (_googleRateLimiter === undefined) _googleRateLimiter = makeOptInRateLimiter(process.env.GEV_RATELIMIT_GOOGLE_PER_MIN);
-  return _googleRateLimiter;
 }
 
 /**
@@ -1335,7 +1329,6 @@ const OPENAI_REALTIME_VOICE_DEFAULT = 'marin';
 const OPENAI_REALTIME_REASONING_DEFAULT = 'low';
 const OPENAI_REALTIME_CONTEXT_TOKENS_DEFAULT = 3000;
 const OPENAI_REALTIME_CONTEXT_RETENTION_DEFAULT = 0.5;
-const OPENAI_HUD_SUMMARY_MODEL_DEFAULT = 'gpt-5-nano';
 const REALTIME_DEBUG_LOG_DIR = path.join(__dirname, '.gev-logs');
 const REALTIME_DEBUG_LOG_FILE = path.join(REALTIME_DEBUG_LOG_DIR, 'realtime-conversations.jsonl');
 const REALTIME_DEBUG_LOG_MAX_BYTES = 8 * 1024 * 1024;
@@ -3026,6 +3019,40 @@ function openSkySourceEpochMs(body) {
 function openSkySourceIsStale(sourceEpochMs, now = Date.now()) {
   return Number.isFinite(sourceEpochMs)
     && now - sourceEpochMs > OPENSKY_SOURCE_STALE_MS;
+}
+
+/**
+ * Vite plugin: reject cross-origin requests to every /api route.
+ *
+ * The API sends no CORS headers, so other sites can't read responses — but a
+ * page open in the same browser could still fire blind requests (e.g. POSTs
+ * that spend OpenAI quota). Browsers mark those with Sec-Fetch-Site and/or an
+ * Origin header that doesn't match Host; same-origin app calls and non-browser
+ * clients (curl, tests) send neither and pass through untouched.
+ *
+ * @returns {import('vite').Plugin}
+ */
+function sameOriginApiGuard() {
+  function install(middlewares) {
+    middlewares.use('/api', (req, res, next) => {
+      const origin = req.headers.origin;
+      let crossOrigin = req.headers['sec-fetch-site'] === 'cross-site';
+      if (!crossOrigin && origin) {
+        try { crossOrigin = new URL(origin).host !== req.headers.host; } catch { crossOrigin = true; }
+      }
+      if (crossOrigin) {
+        res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Cross-origin request rejected' }));
+        return;
+      }
+      next();
+    });
+  }
+  return {
+    name: 'same-origin-api-guard',
+    configureServer(server) { install(server.middlewares); },
+    configurePreviewServer(server) { install(server.middlewares); },
+  };
 }
 
 /**
@@ -5806,18 +5833,6 @@ function openAiRealtimeProxy() {
   };
 }
 
-function extractOpenAiResponseText(data) {
-  if (typeof data?.output_text === 'string' && data.output_text.trim()) {
-    return data.output_text.trim();
-  }
-  if (!Array.isArray(data?.output)) return '';
-  return data.output
-    .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
-    .map((part) => part?.text || part?.output_text || '')
-    .join(' ')
-    .trim();
-}
-
 function toFiveWordHudSummary(value) {
   return String(value || '')
     .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
@@ -8507,6 +8522,7 @@ export default defineConfig(({ mode }) => {
   const env = { ...process.env };
   return {
     plugins: [
+      sameOriginApiGuard(), // first, so it runs before every /api handler
       cesium(),
       openSkyProxy(),
       celestrakProxy(),

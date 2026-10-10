@@ -2171,7 +2171,7 @@ silently demoting every later lookup for the session.
 
 ### AI HUD Summary (June 2026)
 
-- HUD `SUMMARY` readout requests a five-word intelligence-style summary from `/api/openai/hud-summary` (model `OPENAI_HUD_SUMMARY_MODEL`, default `gpt-5-nano`, minimal reasoning).
+- HUD `SUMMARY` readout requests a five-word intelligence-style summary from `/api/openai/hud-summary`, routed through OmniRoute (model `OMNI_HUD_MODEL`, default `auto/chat`).
 - Input is the live basemap label context (place/street/nearby-place labels + enabled layers) — the model is instructed not to infer from coordinates.
 - Output is sanitized to exactly five words; falls back to the deterministic telemetry summary on error/timeout (5s abort); typewriter animation on update.
 

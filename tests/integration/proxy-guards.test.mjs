@@ -190,3 +190,27 @@ test('radio: unknown station click → 404, unknown route → 404', async () => 
   assert.equal((await call('POST', '/api/radio/click/00000000-0000-0000-0000-000000000000')).status, 404);
   assert.equal((await call('GET', '/api/radio/nope')).status, 404);
 });
+
+// ─── Same-origin guard: other sites in the browser can't drive the API ─────
+
+test('cross-origin browser requests to /api are rejected with 403', async () => {
+  const evil = { Origin: 'https://evil.example' };
+  for (const [verb, path] of [['POST', '/api/gev-voice/chat'], ['GET', '/api/realtime/token'], ['GET', '/api/voice/mode']]) {
+    const res = await call(verb, path, { headers: evil, body: verb === 'POST' ? '{}' : undefined });
+    assert.equal(res.status, 403, `${verb} ${path}: expected 403, got ${res.status}`);
+  }
+  // A different local port is a different origin too.
+  const port = new URL(baseUrl).port === '1' ? '2' : '1';
+  assert.equal((await call('GET', '/api/voice/mode', { headers: { Origin: `http://127.0.0.1:${port}` } })).status, 403);
+  // No Origin (e.g. <img>/<form> GET) but the browser flags it cross-site.
+  assert.equal((await call('GET', '/api/voice/mode', { headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+  assert.equal((await call('GET', '/api/voice/mode', { headers: { Origin: 'null' } })).status, 403);
+});
+
+test('same-origin and header-less requests still reach the handlers', async () => {
+  const self = { Origin: new URL(baseUrl).origin, 'Sec-Fetch-Site': 'same-origin' };
+  assert.equal((await call('GET', '/api/voice/mode', { headers: self })).status, 200);
+  assert.equal((await call('POST', '/api/gev-voice/chat', { headers: { ...self, 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
+  assert.equal((await call('GET', '/api/voice/mode', { headers: { 'Sec-Fetch-Site': 'none' } })).status, 200);
+  assert.equal((await call('GET', '/api/voice/mode')).status, 200);
+});
