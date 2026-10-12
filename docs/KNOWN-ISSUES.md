@@ -103,6 +103,6 @@ Context:
   bundled-snapshot layer (`local-firms`, 2026-05-25 data, ~58 MB in-repo), and were
   converted to **live NASA FIRMS data** on 2026-07-16: the `/api/firms` proxy merges
   three VIIRS NRT sources (trailing 24 h, 30 min cache, serve-stale-on-failure) and the
-  bundled snapshot was deleted. Requires a free server-side `FIRMS_MAP_KEY`; without it
-  the layer shows a KEY REQUIRED state.
+  bundled snapshot was deleted. A free server-side `FIRMS_MAP_KEY` enables per-pixel
+  detections; without it the proxy serves keyless NASA EONET wildfire events instead.
 - Weather radar is still held out of OSS v1 after QA found the previous overlay did not provide reliable visible value.

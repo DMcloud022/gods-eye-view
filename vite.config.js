@@ -1989,8 +1989,9 @@ function tomtomProxy() {
  *   GET /api/firms        → {fetchedAt, stale, ttlMs, sources, count, fires}
  *   GET /api/firms/status → {hasKey, lastFetch, count, stale, ttlMs, transactions}
  *
- * Keyless (no FIRMS_MAP_KEY): /api/firms → 503 {error:'no_key'}; status →
- * {hasKey:false}. Upstream is never touched without a key.
+ * Keyless (no FIRMS_MAP_KEY): /api/firms serves NASA EONET wildfire events
+ * instead (502 when EONET is down with no cache); status → {hasKey:false,
+ * source:'eonet'}. The FIRMS upstream is never touched without a key.
  *
  * @returns {import('vite').Plugin}
  */
@@ -2227,7 +2228,9 @@ function firmsProxy() {
             } else if (eonetEntry) {
               sendJson(200, buildPayload(eonetEntry, true));
             } else {
-              sendJson(503, { error: 'no_key' }); // EONET also unreachable
+              // Not 503 no_key: the client would show KEY REQUIRED, but no key is
+              // needed — the free feed is just down.
+              sendJson(502, { error: 'eonet fetch failed and no cache available' });
             }
             return;
           }

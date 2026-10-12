@@ -83,3 +83,24 @@ test('same-origin API guard is registered before every other plugin', () => {
   const plugins = CONFIG.match(/plugins:\s*\[\s*([a-zA-Z]+)\(/)?.[1];
   assert.equal(plugins, 'sameOriginApiGuard');
 });
+
+test('every setting documented in .env.example is read somewhere', () => {
+  const example = readFileSync(path.join(ROOT, '.env.example'), 'utf8');
+  const names = [...new Set([...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]+)=/gm)].map((m) => m[1]))];
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory()
+    ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+  const sources = [...walk(path.join(ROOT, 'src')), ...walk(path.join(ROOT, 'scripts'))]
+    .filter((f) => /\.(m?js|sh)$/.test(f) && !f.endsWith('.test.mjs'))
+    .map((f) => readFileSync(f, 'utf8'));
+  sources.push(CONFIG);
+  const unread = names.filter((name) => !sources.some((text) => text.includes(name)));
+  assert.deepEqual(unread, [], `documented but never read (dead config): ${unread.join(', ')}`);
+});
+
+test('keyless FIRMS fallback never answers no_key (the client would show KEY REQUIRED)', () => {
+  const start = CONFIG.indexOf('// No FIRMS key — use NASA EONET as a free, keyless wildfire fallback.');
+  assert.ok(start > 0, 'EONET fallback block not found');
+  const block = CONFIG.slice(start, CONFIG.indexOf('\n          }\n', start))
+    .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.ok(!/sendJson\(\s*503,\s*\{\s*error:\s*'no_key'/.test(block), 'keyless EONET path sends 503 no_key');
+});
