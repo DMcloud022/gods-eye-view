@@ -597,3 +597,24 @@ test('search without an authority hook preserves the existing caller contract', 
   assert.equal(result.navigationMode, 'city-overview');
   assert.equal(viewer.flights.length, 1);
 });
+
+test('own lookup timeout is a failed search; a caller signal timeout stays a cancellation', async () => {
+  const priorFetch = globalThis.fetch;
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const priorWindow = globalThis.window;
+  globalThis.window = {};
+  globalThis.fetch = async () => { throw new DOMException('timed out', 'TimeoutError'); };
+  try {
+    const viewer = stubViewer();
+    assert.equal(await searchAndFlyTo(viewer, 'austin', {}), null);
+    assert.equal(
+      await searchAndFlyTo(viewer, 'austin', { signal: new AbortController().signal }),
+      CANCELLED_SEARCH,
+    );
+    assert.equal(viewer.flights.length, 0);
+  } finally {
+    globalThis.fetch = priorFetch;
+    if (hadWindow) globalThis.window = priorWindow;
+    else delete globalThis.window;
+  }
+});

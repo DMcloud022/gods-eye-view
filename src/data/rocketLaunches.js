@@ -44,6 +44,12 @@ let _lastError = null;
 let _orbitMatches = 0;
 let _clickHandler = null;
 let _moveHandler = null;
+/** Min spacing between hover drillPicks (each one is up to 12 pick passes). */
+const MISSION_HOVER_PICK_MS = 100;
+let _hoverPickAt = 0;
+let _hoverPickTimer = 0;
+/** True only while this layer owns the canvas cursor ('pointer'). */
+let _hoverCursorOwned = false;
 let _viewer = null;
 let _declutterHandler = null;
 let _dataManager = null;
@@ -1002,6 +1008,38 @@ function entityLaunchId(entity) {
   if (!entity?.id || typeof entity.id !== 'string') return null;
   const match = entity.id.match(/^rocket-[^:]+:([^:]+)/);
   return match?.[1] || null;
+}
+
+/**
+ * Throttled hover pick: at most one drillPick per MISSION_HOVER_PICK_MS, plus
+ * a trailing pass so the final pointer position (e.g. just off a mission) is
+ * never dropped. The cursor is only cleared if this layer set it, so another
+ * layer's cursor (CCTV gizmo 'grab') is not clobbered.
+ */
+function hoverMissionAt(viewer, position) {
+  clearTimeout(_hoverPickTimer);
+  _hoverPickTimer = 0;
+  if (!_enabled || !_dataSource?.show || !position || viewer.isDestroyed?.()) return;
+  const now = Date.now();
+  const wait = MISSION_HOVER_PICK_MS - (now - _hoverPickAt);
+  if (wait > 0) {
+    const pending = Cesium.Cartesian2.clone(position);
+    _hoverPickTimer = setTimeout(() => hoverMissionAt(viewer, pending), wait);
+    return;
+  }
+  _hoverPickAt = now;
+  const hovered = viewer.scene.drillPick(position, 12)
+    .some((picked) => entityLaunchId(picked?.id));
+  if (hovered === _hoverCursorOwned) return;
+  _hoverCursorOwned = hovered;
+  viewer.scene.canvas.style.cursor = hovered ? 'pointer' : '';
+}
+
+function clearMissionHoverPick() {
+  clearTimeout(_hoverPickTimer);
+  _hoverPickTimer = 0;
+  _hoverPickAt = 0;
+  _hoverCursorOwned = false;
 }
 
 function clearMissionOverlaySources() {
@@ -3435,11 +3473,7 @@ const rocketLaunchesLayer = {
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
     _moveHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
     _moveHandler.setInputAction((movement) => {
-      if (!_enabled || !_dataSource?.show) return;
-      const missionEntity = viewer.scene.drillPick(movement.endPosition, 12)
-        .map((picked) => picked?.id)
-        .find((candidate) => entityLaunchId(candidate));
-      viewer.scene.canvas.style.cursor = missionEntity ? 'pointer' : '';
+      hoverMissionAt(viewer, movement.endPosition);
     }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
     // Apply horizon visibility before Cesium traverses and picks the scene.
     // A postRender write is one frame late and can remain visibly stale when
@@ -3489,6 +3523,7 @@ const rocketLaunchesLayer = {
     if (_dataSource) _dataSource.show = false;
     syncMissionOrbitPrimitiveVisibility();
     if (_viewer?.scene?.canvas) _viewer.scene.canvas.style.cursor = '';
+    clearMissionHoverPick();
     hideLaunchPadZone();
     hideReplayVehicleOverlay();
     _selectedLaunchId = null;
@@ -3522,6 +3557,7 @@ const rocketLaunchesLayer = {
     _clickHandler = null;
     if (_moveHandler) _moveHandler.destroy();
     _moveHandler = null;
+    clearMissionHoverPick();
     if (_declutterHandler) _declutterHandler();
     _declutterHandler = null;
     destroyLaunchPadZonePrimitive();

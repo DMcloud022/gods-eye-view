@@ -373,6 +373,9 @@ export async function searchAndFlyTo(viewer, query, options = {}) {
   try {
     response = await fetch(url, { signal: fetchSignal });
   } catch (e) {
+    // Our own 8 s timeout is a failed lookup (caller shows a toast), not a
+    // navigation handoff; a caller-supplied signal keeps its cancel meaning.
+    if (!options.signal && e?.name === 'TimeoutError') return null;
     if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return CANCELLED_SEARCH;
     return null;
   }

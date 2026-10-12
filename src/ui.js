@@ -2564,6 +2564,7 @@ export class StyleManager {
     this._acSuggestions = [];   // [{label,sub,lat,lon,type,extent}]
     this._acActiveIndex = -1;   // keyboard-selected suggestion index
     this._acDebounceTimer = null;
+    this._acBlurTimer = null;
     this._acPhotonAbort = null; // AbortController for in-flight Photon request
     this._locationPills = document.getElementById('location-pills');
     this._poiRow = document.getElementById('poi-row');
@@ -9487,17 +9488,18 @@ export class StyleManager {
 
     // Autocomplete: local results are instant (0 ms); Photon augments after 180 ms.
     this._locationSearch.addEventListener('input', () => {
+      clearTimeout(this._acBlurTimer);
       clearTimeout(this._acDebounceTimer);
       this._acPhotonAbort?.abort();
       const q = this._locationSearch.value.trim();
       if (!q) { this._acHide(); return; }
-      // Immediately show local hits — no network, no debounce.
+      // Immediately show local hits — no network, no debounce. Always replace
+      // the list (an empty one hides it) so Enter can't pick a stale
+      // highlighted suggestion that no longer matches the typed text.
       const local = _acSearchLocal(q);
-      if (local.length) {
-        this._acSuggestions = local;
-        this._acActiveIndex = -1;
-        this._acRender();
-      }
+      this._acSuggestions = local;
+      this._acActiveIndex = -1;
+      this._acRender();
       // After 180 ms, augment with Photon results (handles obscure / long-tail places).
       if (q.length >= 2) {
         this._acDebounceTimer = setTimeout(() => this._acFetchPhoton(q, local), 180);
@@ -9506,6 +9508,8 @@ export class StyleManager {
 
     // Keyboard navigation within the dropdown + Enter to submit
     this._locationSearch.addEventListener('keydown', async (e) => {
+      // IME composition (CJK input): Enter/arrows confirm the candidate, not search.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         this._acMove(1);
@@ -9537,8 +9541,11 @@ export class StyleManager {
 
     // Hide dropdown on blur (small delay so click on suggestion registers first)
     this._locationSearch.addEventListener('blur', () => {
-      setTimeout(() => this._acHide(), 150);
+      clearTimeout(this._acBlurTimer);
+      this._acBlurTimer = setTimeout(() => this._acHide(), 150);
     });
+    // Refocusing within the delay must not wipe the new session's suggestions.
+    this._locationSearch.addEventListener('focus', () => clearTimeout(this._acBlurTimer));
   }
 
   // ── Autocomplete helpers ─────────────────────────────────────────────────
@@ -10634,6 +10641,8 @@ export class StyleManager {
     this._cctvSummaryTypingTimer = null;
     clearTimeout(this._acDebounceTimer);
     this._acDebounceTimer = null;
+    clearTimeout(this._acBlurTimer);
+    this._acBlurTimer = null;
     this._acPhotonAbort?.abort();
     this._acPhotonAbort = null;
     this._leftStackResizeObserver?.disconnect();

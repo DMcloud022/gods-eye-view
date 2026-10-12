@@ -606,7 +606,10 @@ export function createLocalGeoJsonLayer({
               
               if (targetPos) {
                 const carto = Cesium.Cartographic.fromCartesian(targetPos);
-                
+                // Degenerate geometry (center at the origin) has no cartographic;
+                // bail before disabling inputs so the camera can't get locked.
+                if (!carto) return;
+
                 // Disable interactions so Cesium doesn't magically cancel the flight
                 viewer.scene.screenSpaceCameraController.enableInputs = false;
                 

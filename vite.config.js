@@ -8419,6 +8419,8 @@ function autocompleteProxy() {
           headers: { 'User-Agent': NOMINATIM_UA },
           signal: AbortSignal.timeout(5000),
         });
+        // An upstream 429/5xx must not be cached as "no results" for this query.
+        if (!upstream.ok) throw new Error(`photon ${upstream.status}`);
         const geojson = await upstream.json().catch(() => ({ features: [] }));
         const features = Array.isArray(geojson?.features) ? geojson.features : [];
         const suggestions = features

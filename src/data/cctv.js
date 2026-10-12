@@ -414,6 +414,8 @@ const HOVER_RELEASE_MS = 1_000;
 let _hoverCardId = null;
 let _hoverReleaseTimer = 0;
 let _hoverLastPickAt = 0;
+/** Trailing hover pass, so the last pointer position inside a throttle window still runs. */
+let _hoverTrailingTimer = 0;
 
 /** Test seam: republishes host entries through the real push path, so tests
  * can observe the pristine module default without touching the setter. */
@@ -2923,8 +2925,15 @@ function pushAmbientCardEntries() {
 function handleHoverMove(position) {
   if (!_enabled || _cameraMoving || _calibrationMode || !position) return;
   if (!_viewer || _viewer.isDestroyed()) return;
+  clearTimeout(_hoverTrailingTimer);
+  _hoverTrailingTimer = 0;
   const now = Date.now();
-  if (now - _hoverLastPickAt < HOVER_PICK_THROTTLE_MS) return;
+  const wait = HOVER_PICK_THROTTLE_MS - (now - _hoverLastPickAt);
+  if (wait > 0) {
+    const pending = Cesium.Cartesian2.clone(position);
+    _hoverTrailingTimer = setTimeout(() => handleHoverMove(pending), wait);
+    return;
+  }
   _hoverLastPickAt = now;
   let picked = null;
   try {
@@ -2986,6 +2995,8 @@ function clearHoverCard() {
   cancelHoverRelease();
   _hoverCardId = null;
   _hoverLastPickAt = 0;
+  clearTimeout(_hoverTrailingTimer);
+  _hoverTrailingTimer = 0;
 }
 
 /**
