@@ -2059,7 +2059,7 @@ test('interrupting delayed Radio geocoding causes no enable or selection side ef
   const calls = [];
   let announceFetchStarted;
   const fetchStarted = new Promise((resolve) => { announceFetchStarted = resolve; });
-  globalThis.window = { __GOOGLE_MAPS_API_KEY__: 'test-key' };
+  globalThis.window = {};
   globalThis.fetch = async (_url, options) => new Promise((_resolve, reject) => {
     announceFetchStarted();
     options.signal.addEventListener('abort', () => {

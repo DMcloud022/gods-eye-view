@@ -816,7 +816,7 @@ test('real Radio Select cannot enable or play after a same-response Disable comp
     detail: { textContent: '', title: '' },
     errorDetail: { textContent: '' },
   };
-  globalThis.window = { __GOOGLE_MAPS_API_KEY__: 'test-key' };
+  globalThis.window = {};
   globalThis.fetch = async () => {
     announceLookupStarted();
     await lookupGate;
@@ -947,7 +947,7 @@ test('generic same-response Radio visibility disable supersedes delayed Select',
     detail: { textContent: '', title: '' },
     errorDetail: { textContent: '' },
   };
-  globalThis.window = { __GOOGLE_MAPS_API_KEY__: 'test-key' };
+  globalThis.window = {};
   globalThis.fetch = async () => {
     announceLookupStarted();
     await lookupGate;

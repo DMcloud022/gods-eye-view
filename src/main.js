@@ -85,7 +85,6 @@ async function init() {
     const googleApiKey = import.meta.env.GOOGLE_MAPS_API_KEY;
     if (googleApiKey) {
       Cesium.GoogleMaps.defaultApiKey = googleApiKey;
-      window.__GOOGLE_MAPS_API_KEY__ = googleApiKey;
     }
 
     // Create the Cesium viewer with minimal chrome

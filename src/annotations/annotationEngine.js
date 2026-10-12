@@ -2,9 +2,12 @@ import * as Cesium from 'cesium';
 import { holdContinuousRender, releaseContinuousRender } from '../renderGovernor.js';
 import { isRateLimitedOutcome, resolveAnnotationTarget } from './annotationResolver.js';
 
-// Dev convenience: expose the app's Cesium instance for console/preview probing
+// Dev convenience: expose the app's Cesium instance for console probing
 // (single shared module instance — avoids dual-Cesium state bugs when testing).
-if (typeof window !== 'undefined' && !window.__CESIUM__) window.__CESIUM__ = Cesium;
+// Dev server only; production builds don't publish the global.
+if (import.meta.env && import.meta.env.DEV && typeof window !== 'undefined' && !window.__CESIUM__) {
+  window.__CESIUM__ = Cesium;
+}
 
 /**
  * Annotation engine — the voice agent's "whiteboard" over the 3D world.
