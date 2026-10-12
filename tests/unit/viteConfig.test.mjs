@@ -6,7 +6,7 @@
  * - Every registered /api route has a 405 method-guard case in the offline
  *   integration suite, so new endpoints can't ship untested.
  * - Only browser-scoped keys are injected into the client bundle.
- * - The dev server defaults to localhost.
+ * - The dev server and every launcher script default to localhost.
  * - The same-origin /api guard runs before every other plugin.
  * - The built bundle contains no server-side secret patterns.
  */
@@ -103,4 +103,14 @@ test('keyless FIRMS fallback never answers no_key (the client would show KEY REQ
   const block = CONFIG.slice(start, CONFIG.indexOf('\n          }\n', start))
     .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
   assert.ok(!/sendJson\(\s*503,\s*\{\s*error:\s*'no_key'/.test(block), 'keyless EONET path sends 503 no_key');
+});
+
+test('every dev launcher script defaults to localhost, not all interfaces', () => {
+  const dir = path.join(ROOT, 'scripts');
+  const launchers = readdirSync(dir).filter((f) => f.endsWith('.sh'))
+    .filter((f) => /--host/.test(readFileSync(path.join(dir, f), 'utf8')));
+  assert.ok(launchers.length >= 3, `expected ≥3 launchers, found ${launchers.length}`);
+  const exposed = launchers.filter((f) => !/^HOST="\$\{HOST:-localhost\}"$/m
+    .test(readFileSync(path.join(dir, f), 'utf8')));
+  assert.deepEqual(exposed, [], `launchers not defaulting to localhost: ${exposed.join(', ')}`);
 });
