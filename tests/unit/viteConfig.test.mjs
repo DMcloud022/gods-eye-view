@@ -114,3 +114,23 @@ test('every dev launcher script defaults to localhost, not all interfaces', () =
     .test(readFileSync(path.join(dir, f), 'utf8')));
   assert.deepEqual(exposed, [], `launchers not defaulting to localhost: ${exposed.join(', ')}`);
 });
+
+test('SIGMET proxy requests one hazard per call (the upstream rejects lists)', () => {
+  assert.ok(!/sigmet\?[^'`]*hazard=[A-Za-z]+,/.test(CONFIG), 'comma-separated hazard list is rejected upstream');
+  assert.match(CONFIG, /\['turb', 'ice', 'ts'\]\.map\(/);
+});
+
+test('Overpass proxy only caches 2xx and skips refusing mirrors', () => {
+  assert.match(CONFIG, /if \(payload\.status >= 200 && payload\.status < 300\s*&& !payload\.rateLimited/);
+  assert.ok(!/if \(payload\.status < 500 && !payload\.rateLimited/.test(CONFIG), '4xx responses would be cached');
+  assert.match(CONFIG, /status >= 500 \|\| status === 403 \|\| status === 406/);
+});
+
+test('keyless EONET fires are not clamped to the FIRMS trailing 24 h', () => {
+  assert.match(CONFIG, /category=wildfires&days=14&status=open/);
+  assert.match(CONFIG, /const fires = eonet \? entry\.fires : filterTrailing24h\(/);
+});
+
+test('radio broad query stays under the per-mirror timeout (limit 500 took ~25 s)', () => {
+  assert.match(CONFIG, /limit: index === 0 \? '300' : '220'/);
+});

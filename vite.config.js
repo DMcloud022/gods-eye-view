@@ -299,6 +299,8 @@ async function readOverpassDisk(cacheKey, maxAgeMs) {
     const raw = await fsp.readFile(overpassDiskPath(cacheKey), 'utf8');
     const payload = JSON.parse(raw);
     if (!payload || typeof payload.body !== 'string' || !Number.isFinite(payload.cachedAt)) return null;
+    // Older builds cached 4xx answers (e.g. a mirror's 406 block page); never serve them.
+    if (Number.isFinite(payload.status) && (payload.status < 200 || payload.status >= 300)) return null;
     if (Date.now() - payload.cachedAt > maxAgeMs) return null;
     return payload;
   } catch {
@@ -1077,7 +1079,9 @@ export function createRadioProxyMiddleware({ fetchImpl = null, lookupImpl = look
         hidebroken: 'true',
         order: 'clickcount',
         reverse: 'true',
-        limit: index === 0 ? '500' : '220',
+        // Broad query capped at 300: limit=500 takes ~25 s upstream (past the
+        // 20 s per-mirror timeout, so it always failed); 300 answers in ~3 s.
+        limit: index === 0 ? '300' : '220',
       });
       if (tag) params.set('tag', tag);
       try {
@@ -2076,7 +2080,10 @@ function firmsProxy() {
    * 24 h at serve time so a stale cache never serves >24h-old detections.
    */
   function buildPayload(entry, stale) {
-    const fires = filterTrailing24h(entry.fires, Date.now());
+    // EONET events are ongoing fires dated by their last report (often days
+    // old), so only FIRMS pixel detections get the trailing-24h clamp.
+    const eonet = entry.sources?.some((source) => source.source === 'EONET_WILDFIRE');
+    const fires = eonet ? entry.fires : filterTrailing24h(entry.fires, Date.now());
     return {
       fetchedAt: entry.at,
       stale,
@@ -2126,7 +2133,9 @@ function firmsProxy() {
    * is absent; prefer FIRMS when available for higher-resolution detections.
    */
   async function fetchEonetFires() {
-    const url = 'https://eonet.gsfc.nasa.gov/api/v3/events?category=wildfires&days=2&status=open';
+    // EONET updates irregularly (often several days apart): days=2 was usually
+    // empty, so look back 14 days for events that are still open.
+    const url = 'https://eonet.gsfc.nasa.gov/api/v3/events?category=wildfires&days=14&status=open';
     const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`EONET HTTP ${res.status}`);
     const { tooLarge, text: body } = await readCappedResponseText(res, 512 * 1024);
@@ -2675,7 +2684,8 @@ async function fetchOverpassPayload(body, maxResponseBytes = OVERPASS_MAX_RESPON
         lastError = new Error(`Overpass runtime error (${endpoint})`);
         continue;
       }
-      if (status >= 500) {
+      // 403/406 = this mirror refuses our IP/client; another mirror may not.
+      if (status >= 500 || status === 403 || status === 406) {
         lastError = new Error(`Overpass upstream returned ${status} (${endpoint})`);
         continue;
       }
@@ -2782,7 +2792,10 @@ function overpassProxy() {
           _overpassConcurrent += 1;
           const requestPromise = fetchOverpassPayload(safeBody)
             .then((payload) => {
-              if (payload.status < 500 && !payload.rateLimited && !payload.runtimeError) {
+              // Only 2xx is cacheable: a 4xx (e.g. a 406 block page) cached for
+              // days would keep roads missing long after the mirror recovers.
+              if (payload.status >= 200 && payload.status < 300
+                && !payload.rateLimited && !payload.runtimeError) {
                 const entry = { ...payload, cachedAt: Date.now() };
                 _overpassCache.set(cacheKey, entry);
                 trimOverpassCache();
@@ -7991,24 +8004,45 @@ function sigmetProxy() {
           res.end(_cache);
           return;
         }
-        const upstream = await fetch(
-          'https://aviationweather.gov/api/data/sigmet?format=geojson&hazard=TURB,ICE,TS,ASH',
-          {
-            headers: {
-              'User-Agent': 'gods-eye-view/1.0 (non-commercial OSINT viewer)',
-              Accept: 'application/geo+json, application/json',
+        // The upstream now accepts ONE hazard per request (a comma list, and
+        // ASH, answer 400 "Invalid value for hazard"), so fetch each and merge.
+        const results = await Promise.all(['turb', 'ice', 'ts'].map(async (hazard) => {
+          const upstream = await fetch(
+            `https://aviationweather.gov/api/data/sigmet?format=geojson&hazard=${hazard}`,
+            {
+              headers: {
+                'User-Agent': 'gods-eye-view/1.0 (non-commercial OSINT viewer)',
+                Accept: 'application/geo+json, application/json',
+              },
+              signal: AbortSignal.timeout(12000),
             },
-            signal: AbortSignal.timeout(12000),
-          },
-        );
-        const { tooLarge, text: body } = await readCappedResponseText(upstream, 2 * 1024 * 1024);
-        if (tooLarge) {
+          );
+          const { tooLarge, text } = await readCappedResponseText(upstream, 2 * 1024 * 1024);
+          return { status: upstream.status, ok: upstream.ok, tooLarge, text };
+        }));
+        if (results.some((result) => result.tooLarge)) {
           res.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
           res.end(JSON.stringify({ error: 'SIGMET response too large' }));
           return;
         }
-        if (upstream.ok) { _cache = body; _cacheAt = now; }
-        res.writeHead(upstream.status, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'MISS' });
+        const failed = results.find((result) => !result.ok);
+        if (failed) {
+          res.writeHead(failed.status, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'MISS' });
+          res.end(failed.text);
+          return;
+        }
+        const features = results.flatMap((result) => {
+          try {
+            const parsed = JSON.parse(result.text);
+            return Array.isArray(parsed?.features) ? parsed.features : [];
+          } catch {
+            return [];
+          }
+        });
+        const body = JSON.stringify({ type: 'FeatureCollection', features });
+        _cache = body;
+        _cacheAt = now;
+        res.writeHead(200, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store', 'X-Cache': 'MISS' });
         res.end(body);
       } catch (e) {
         if (_cache) {
@@ -8036,6 +8070,8 @@ function sigmetProxy() {
 const _autocompleteRateLimiter = makeRateLimiter({ windowMs: 60_000, max: 30, globalMax: 300 });
 
 function autocompleteProxy() {
+  // The geocode User-Agent constant lives inside googlePlacesContextProxy and is not visible here.
+  const PHOTON_UA = 'gods-eye-view/0.1 (+https://github.com/DMcloud022/gods-eye-view)';
   const CACHE = new Map();  // key → {json, at}
   const CACHE_MS = 45_000;
   const MAX_CACHE = 400;
@@ -8072,8 +8108,9 @@ function autocompleteProxy() {
         photonUrl.searchParams.set('limit', '6');
         photonUrl.searchParams.set('lang', 'en');
         const upstream = await fetch(photonUrl.toString(), {
-          headers: { 'User-Agent': NOMINATIM_UA },
-          signal: AbortSignal.timeout(5000),
+          headers: { 'User-Agent': PHOTON_UA },
+          // Photon often takes 4-7 s to answer.
+          signal: AbortSignal.timeout(8000),
         });
         // An upstream 429/5xx must not be cached as "no results" for this query.
         if (!upstream.ok) throw new Error(`photon ${upstream.status}`);

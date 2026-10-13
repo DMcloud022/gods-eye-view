@@ -61,3 +61,12 @@ test('CCTV hover throttle schedules a trailing pass and clears it with the card'
   const clear = src.slice(src.indexOf('function clearHoverCard('), src.indexOf('function clearHoverCard(') + 300);
   assert.match(clear, /clearTimeout\(_hoverTrailingTimer\)/);
 });
+
+test('autocomplete proxy only uses a User-Agent defined in its own scope', () => {
+  const config = read('vite.config.js');
+  const start = config.indexOf('function autocompleteProxy()');
+  const fn = config.slice(start, config.indexOf("name: 'autocomplete-proxy'", start));
+  assert.ok(!fn.includes('NOMINATIM_UA'), 'NOMINATIM_UA is out of scope here and throws a ReferenceError');
+  assert.match(fn, /const PHOTON_UA = /);
+  assert.match(fn, /'User-Agent': PHOTON_UA/);
+});
