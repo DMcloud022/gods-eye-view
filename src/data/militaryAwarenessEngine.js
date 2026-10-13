@@ -89,7 +89,7 @@ export function getAwarenessNavigationTargets(cohorts, subject = null, visitedKe
   const targets = [];
   for (const cohort of Array.isArray(cohorts) ? cohorts : []) {
     const layerId = cohort?.id;
-    if (!['flights', 'military', 'ais-live-vessels', 'military-installations'].includes(layerId)) continue;
+    if (!['flights', 'military', 'ais-live-vessels'].includes(layerId)) continue;
     const sourceItems = Array.isArray(cohort?.summary?.navigationNearest)
       ? cohort.summary.navigationNearest
       : (Array.isArray(cohort?.summary?.nearest) ? cohort.summary.nearest : []);
@@ -105,7 +105,7 @@ export function getAwarenessNavigationTargets(cohorts, subject = null, visitedKe
     // UNVISITED outranks layer affinity. Ordering subject-layer first put
     // already-visited same-layer contacts ahead of unvisited contacts in every
     // other layer, so NEXT ping-ponged inside the subject's own layer and never
-    // reached vessels, installations, or the other flight layer at all.
+    // reached vessels or the other flight layer at all.
     const visitedOrder = Number(a.visited) - Number(b.visited);
     if (visitedOrder) return visitedOrder;
     const subjectOrder = Number(a.layerId !== subject?.layerId) - Number(b.layerId !== subject?.layerId);

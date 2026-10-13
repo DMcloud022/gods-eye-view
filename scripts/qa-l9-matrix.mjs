@@ -172,7 +172,6 @@ const CREDIT_EXPECTATIONS = {
   radio: /Radio Browser/i,
   bikeshare: /GBFS|bikeshare/i,
   'ais-live-vessels': /AISStream/i,
-  'military-installations': /OpenStreetMap/i,
   'local-datacenters': /OpenStreetMap/i,
   'local-dams': /OpenStreetMap/i,
   'local-firms': /FIRMS/i,
@@ -968,7 +967,7 @@ check({
 });
 
 check({
-  id: 'B18', group: 'B', desc: 'Overpass proxy answers a real query (roads, annotations, installations)',
+  id: 'B18', group: 'B', desc: 'Overpass proxy answers a real query (roads, annotations)',
   heavy: true,
   run: async () => {
     // Contract: a form-encoded body with exactly one bounded `data` query.
@@ -1066,7 +1065,7 @@ const BROWSER_CHECKS = [
   ['C8', 'Vessels: live rows when keyed, honest UNAVAILABLE when not'],
   ['C9', 'Fires: live cells when keyed, honest KEY REQUIRED when not'],
   ['C10', 'Traffic: LIVE mode when keyed, clearly-labelled SIMULATION when not'],
-  ['C11', 'Bundled layers render: datacenters, dams, submarine cables, installations'],
+  ['C11', 'Bundled layers render: datacenters, dams, submarine cables'],
   ['C12', 'Attribution lightbox lists a credit for every enabled layer'],
   ['C13', 'Clean-UI keeps the Google/Cesium credit line visible (ToS)'],
   ['C14', 'No key material reaches browser state, URLs or storage'],
@@ -1125,7 +1124,7 @@ check({
       // Narrow and evidence-gated: the console assertion is the failing one AND
       // the noise is an upstream proxy honestly reporting unavailability.
       when: /runtime console remains clean[\s\S]{0,400}?503/,
-      note: 'the only failing assertion is "runtime console remains clean", and the noise is honest 503s from an upstream-backed proxy (e.g. /api/military-installations reporting "temporarily unavailable"). Environmental, but still a FAIL: re-run when the upstream recovers before filing anything.',
+      note: 'the only failing assertion is "runtime console remains clean", and the noise is honest 503s from an upstream-backed proxy (e.g. a proxy reporting "temporarily unavailable"). Environmental, but still a FAIL: re-run when the upstream recovers before filing anything.',
     }],
   }),
 });
@@ -1390,7 +1389,7 @@ async function runBrowserGroup(record) {
     await evalBounded(async () => {
       const dm = window.__godsEyeView.dataManager;
       const heavy = ['cctv', 'traffic', 'flights', 'satellites', 'telegeography-submarine-cables',
-        'local-datacenters', 'local-dams', 'military-installations', 'earthquakes'];
+        'local-datacenters', 'local-dams', 'earthquakes'];
       for (const id of heavy) {
         if (!dm.layers.has(id)) continue;
         try {
@@ -1661,7 +1660,7 @@ async function runBrowserGroup(record) {
     if (stillLoading.length) {
       return crash(`still loading when the ${45}s budget expired: ${stillLoading.join(', ')} [all: ${out.join(', ')}] — this check could not determine whether they render, so it verified nothing`);
     }
-    let zero = out.filter((o) => /=0$|MISSING/.test(o));
+    const zero = out.filter((o) => /=0$|MISSING/.test(o));
     if (zero.length) {
       // A bundled layer can read 0 while the heavy layers are live (flights,
       // CCTV, traffic) — the perf-wave budgets and scope mask legitimately
@@ -1683,76 +1682,9 @@ async function runBrowserGroup(record) {
       if (stillZero.length) {
         return fail(`empty bundled layer(s) even on a quiet stage: ${stillZero.join(', ')} [under load: ${out.join(', ')}]`);
       }
-      // Do NOT return here: the installations assertion below is part of this
-      // check's claim and must still run.
       loadNote = ` (under load: ${out.join(', ')}; on a quiet stage: ${retried.join(', ')} — the zero reading was load-related suppression, not a render failure)`;
     }
-    zero = [];
-
-    // military-installations is named in this check's description, so it is
-    // asserted — not quietly excluded. It is viewport-scoped (≤10° span,
-    // src/data/militaryInstallations.js MAX_VIEWPORT_DEGREES) and returns 0
-    // from a global camera, so fly to a tight box over a known base cluster
-    // first, and cross-check the layer against its own API: rows from the API
-    // but nothing on the map is a PRODUCT failure; nothing from either is a
-    // positively-identified upstream-data condition.
-    const box = { name: 'San Diego / Coronado', lat: 32.70, lon: -117.18, span: 0.6 };
-    const api = await jget(`/api/military-installations?south=${(box.lat - box.span).toFixed(5)}&west=${(box.lon - box.span).toFixed(5)}&north=${(box.lat + box.span).toFixed(5)}&east=${(box.lon + box.span).toFixed(5)}`, { timeoutMs: 60000 })
-      .catch((e) => ({ status: 0, json: null, text: String(e?.message || e) }));
-    const apiRows = Array.isArray(api.json?.features) ? api.json.features.length
-      : (Array.isArray(api.json?.elements) ? api.json.elements.length
-        : (Array.isArray(api.json) ? api.json.length : null));
-    // The layer gates on the camera's COMPUTED VIEW RECTANGLE (<=10 degrees,
-    // MAX_VIEWPORT_DEGREES), not on the request box. An oblique camera sees to
-    // the horizon and blows past that even from low altitude, so look straight
-    // down: nadir at 25 km spans well under a degree.
-    await evalBounded(async (b) => {
-      const g = window.__godsEyeView;
-      g.viewer.camera.cancelFlight();
-      g.styleManager.applyCameraState({ lat: b.lat, lon: b.lon, alt: 25000, heading: 0, pitch: -90 }, 1.2);
-      await new Promise((r) => setTimeout(r, 4000));
-    }, box, 30000);
-    // `zoom-in` is a TRANSIENT: the layer evaluates the viewport at enable time
-    // and republishes after the camera settles. settle() breaks on the first
-    // truthy `error`, so it latched that transient and never saw the real load.
-    // Poll for a definitive outcome instead, and only then judge.
-    const mi = await settle('military-installations', 5);
-    let ms = mi.stats || {};
-    for (let i = 0; i < 40; i += 1) {
-      if (ms.count > 0) break;
-      if (ms.error && !/zoom.?in/i.test(String(ms.error))) break;
-      // eslint-disable-next-line no-await-in-loop
-      const snap = await evalBounded(() => {
-        const dm = window.__godsEyeView.dataManager;
-        // Nudge the viewport-driven reload: the layer reloads on camera settle.
-        try { dm.layers.get('military-installations')?.module?.refresh?.(); } catch { /* optional */ }
-        return dm.layers.get('military-installations')?.module?.getStats?.() ?? null;
-      }, null, 10000);
-      if (snap) ms = snap;
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    if (mi.missing) return fail(`military-installations layer is not registered [bundled: ${out.join(', ')}]`);
-    if (ms.count > 0) return pass(`${out.join(', ')}, military-installations=${ms.count} over ${box.name}${loadNote}`);
-    if (/zoom-in/.test(String(ms.status || ''))) {
-      return fail(`military-installations refused the ${box.span * 2}° box over ${box.name} as too wide (status=${ms.status}, error="${ms.error}") — the probe camera and the layer's own ≤10° gate disagree`);
-    }
-    if (api.status !== 200) {
-      // Distinguish an honest upstream outage from a broken route: the proxy
-      // has a documented degraded shape (503 + "temporarily unavailable") for
-      // when Overpass is down. That is the app degrading correctly, so it is a
-      // positively identified ENV condition — anything else is a product FAIL.
-      const honestOutage = api.status === 503 && /temporarily unavailable/i.test(String(api.text || ''));
-      if (honestOutage) {
-        return skip(`bundled layers OK (${out.join(', ')}); military-installations could not be checked — its upstream is down and the proxy says so honestly (HTTP 503 "${String(api.json?.error || '').slice(0, 60)}")`, 'ENV');
-      }
-      return fail(`military-installations rendered 0 and its API returned HTTP ${api.status} for ${box.name} — a responsive app failing this route is a product failure: ${String(api.text || '').slice(0, 100)}`);
-    }
-    if (apiRows === null) return crash(`could not read a row count from /api/military-installations to cross-check the empty layer: ${String(api.text || '').slice(0, 100)}`);
-    if (apiRows > 0) {
-      return fail(`/api/military-installations returned ${apiRows} features over ${box.name} but the layer rendered 0 (status=${ms.status}, error=${ms.error || 'none'}) [bundled: ${out.join(', ')}]`);
-    }
-    return skip(`bundled layers OK (${out.join(', ')}); military-installations rendered 0 AND its API returned 0 features over ${box.name} — positively an upstream-data condition, not a render failure`, 'ENV');
+    return pass(`${out.join(', ')}${loadNote}`);
   });
 
   await step('C12', async () => {
@@ -1789,8 +1721,8 @@ async function runBrowserGroup(record) {
     if (!credR.ok) return crash(`could not read the credit display: ${credR.reason}`);
     const cred = credR.value;
     // EVERY enabled layer is checked. Filtering to a known subset meant a layer
-    // outside the list — military-installations, which C11 now enables — could
-    // ship with no attribution while this check claimed full coverage.
+    // outside the list could ship with no attribution while this check claimed
+    // full coverage.
     const missing = [];
     const unmapped = [];
     const exempted = [];

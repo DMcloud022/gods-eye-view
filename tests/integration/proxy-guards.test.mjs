@@ -67,7 +67,6 @@ const METHOD_GUARDS = [
   ['POST', '/api/google/nearby-places?lat=0&lon=0'],
   ['POST', '/api/google/text-search?q=x&lat=0&lon=0'],
   ['POST', '/api/geocode?q=x'],
-  ['POST', '/api/military-installations'],
   ['POST', '/api/regional-brief?lat=0&lon=0'],
   ['POST', '/api/weather-effects?lat=0&lon=0'],
   ['POST', '/api/noaa-alerts'],
@@ -180,8 +179,7 @@ test('google places routes validate coordinates and query', async () => {
   assert.equal((await call('GET', '/api/google/text-search?lat=0&lon=0')).status, 400);
 });
 
-test('bbox / point routes reject missing coordinates', async () => {
-  assert.equal((await call('GET', '/api/military-installations')).status, 400);
+test('point routes reject missing coordinates', async () => {
   assert.equal((await call('GET', '/api/regional-brief')).status, 400);
   assert.equal((await call('GET', '/api/weather-effects')).status, 400);
 });

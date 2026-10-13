@@ -59,7 +59,7 @@ test('navigation prioritizes nearby targets from the selected cohort', () => {
   // Visited state now outranks that affinity, which is the corrected half of
   // this ordering. Ranking the subject's own layer first unconditionally put
   // the already-visited a1 ahead of the unvisited m1, so NEXT cycled inside the
-  // subject's layer and never reached military, vessels, or installations.
+  // subject's layer and never reached military or vessels.
   assert.deepEqual(targets.map((target) => `${target.layerId}:${target.id}`), ['flights:a2', 'military:m1', 'flights:a1']);
 });
 

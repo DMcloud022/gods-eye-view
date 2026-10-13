@@ -2,7 +2,6 @@ import * as Cesium from 'cesium';
 import flightsLayer from './flights.js';
 import militaryFlightsLayer from './militaryFlights.js';
 import aisLiveVesselsLayer from './aisLiveVessels.js';
-import militaryInstallationsLayer from './militaryInstallations.js';
 import {
   AWARENESS_MAX_FLIGHT_SEARCH_RADIUS_M,
   AWARENESS_RADIUS_M,
@@ -24,7 +23,7 @@ import {
 } from '../renderGovernor.js';
 
 const AIRCRAFT_DEPENDENCIES = ['flights', 'military'];
-const DEFERRED_DEPENDENCIES = ['ais-live-vessels', 'military-installations'];
+const DEFERRED_DEPENDENCIES = ['ais-live-vessels'];
 const DEPENDENCIES = [...AIRCRAFT_DEPENDENCIES, ...DEFERRED_DEPENDENCIES];
 const AWARENESS_REFRESH_MS = 750;
 /** @constant {number} Refresh cadence while the camera pose is CHANGING.
@@ -58,7 +57,6 @@ const SOURCE_LABEL = {
   flights: 'OpenSky',
   military: 'adsb.lol',
   'ais-live-vessels': 'AISStream',
-  'military-installations': 'OpenStreetMap',
 };
 
 /**
@@ -71,8 +69,7 @@ const SOURCE_LABEL = {
  * @returns {boolean} Whether the target may start a camera flight.
  */
 export function contextTargetFlyToAllowed(layerId, body = globalThis.document?.body) {
-  const nonAircraft = layerId === 'ais-live-vessels' || layerId === 'military-installations';
-  return !nonAircraft || !body?.classList?.contains('cockpit-mode');
+  return layerId !== 'ais-live-vessels' || !body?.classList?.contains('cockpit-mode');
 }
 
 /**
@@ -259,7 +256,7 @@ function hidePanel() {
   if (state.panel) {
     const markup = `<div class="military-awareness-standby">
       <strong>${state.enabled ? 'CONTEXT READY' : 'GLOBAL CONTEXT OFF'}</strong>
-      <span>${state.enabled ? 'SELECT A FLIGHT, VESSEL, OR MAPPED INSTALLATION' : 'ENABLE TO LOAD OBSERVED / MAPPED PROXIMITY'}</span>
+      <span>${state.enabled ? 'SELECT A FLIGHT OR VESSEL' : 'ENABLE TO LOAD OBSERVED / MAPPED PROXIMITY'}</span>
     </div>`;
     state.panel.hidden = false;
     if (state.panelMarkup !== markup) {
@@ -283,25 +280,14 @@ function sourceState(layerId) {
   // false all-clear, even if a lifecycle adapter briefly reports the requested
   // visibility intent as enabled.
   //
-  // `enabling` and the never-answered predicate cover two DIFFERENT windows, and
-  // both are needed because these dependencies do not settle the same way.
-  //
-  //   - military-installations is covered by `enabling` alone. Its enable() is
-  //     SYNCHRONOUS and the manager awaits update(), which owns the first
-  //     Overpass fetch, so the lifecycle stays `enabling` for that whole window
-  //     however long the fetch takes. Confirmed live: a held 17 s first fetch
-  //     read `enabling` across 34 samples with the panel non-numeric throughout,
-  //     and a failing one settled to `enabled` with status 'unavailable'. Its
-  //     getStats() has no `loading` status to offer in any case —
-  //     setInstallationStatus is only ever called with
-  //     zoom-in/ready/stale/empty/unavailable.
-  //   - ais-live-vessels is what the predicate below is FOR. Its enable() and
-  //     update() both resolve as soon as the first /api/ais-live poll answers,
-  //     so the lifecycle settles to `enabled` — but until the server-side socket
-  //     delivers a position, firstConnectPhase is 'loading' and getStats()
-  //     reports loading: true, lastUpdate: null, count 0, and an UNDEFINED
-  //     status. That zero is an absence of evidence, not evidence of absence,
-  //     and neither the lifecycle nor the status list can tell.
+  // `enabling` and the never-answered predicate cover two DIFFERENT windows.
+  // ais-live-vessels is what the predicate below is FOR. Its enable() and
+  // update() both resolve as soon as the first /api/ais-live poll answers, so
+  // the lifecycle settles to `enabled` — but until the server-side socket
+  // delivers a position, firstConnectPhase is 'loading' and getStats() reports
+  // loading: true, lastUpdate: null, count 0, and an UNDEFINED status. That
+  // zero is an absence of evidence, not evidence of absence, and neither the
+  // lifecycle nor the status list can tell.
   //
   // Deliberately `loading === true` and not truthiness: layers that never report
   // a busy flag (flights, military) must keep answering for themselves, and a
@@ -340,24 +326,7 @@ function isSame(subject, item, prefix, key) {
   return subject?.layerId === prefix && String(subject.id) === String(item?.[key]);
 }
 
-/**
- * Summarize viewport-backed installations without implying radius-complete coverage.
- * @param {Array<object>} items Loaded installation matches.
- * @param {object} source Current source availability and staleness.
- * @returns {object} Awareness summary with viewport-honest reasoning.
- */
-export function summarizeInstallationViewport(items, source) {
-  const summary = summarizeAwarenessCohortForNavigation(items, source);
-  if (summary.count === null) return summary;
-  return {
-    ...summary,
-    reason: summary.count
-      ? 'mapped matches from the loaded viewport'
-      : 'viewport feed is not a complete 250 km survey',
-  };
-}
-
-function summarizeAwarenessCohortForNavigation(items, source, {
+export function summarizeAwarenessCohortForNavigation(items, source, {
   displayLimit = AWARENESS_MAX_EXAMPLES,
   navigationLimit = AWARENESS_MAX_NAVIGATION_EXAMPLES,
 } = {}) {
@@ -478,13 +447,10 @@ function evaluateSubject(subject, sourceStates = collectSourceStates()) {
   const flightsState = sourceStates.flights;
   const militaryState = sourceStates.military;
   const vesselsState = sourceStates['ais-live-vessels'];
-  const installationsState = sourceStates['military-installations'];
   // Same engine the voice analyst calls — see collectAircraftProximityWindow.
   const { flights, military } = collectAircraftProximityWindow(position, { subject });
   const vessels = aisLiveVesselsLayer.getNearby(position, AWARENESS_RADIUS_M, AWARENESS_QUERY_LIMIT)
     .filter((item) => !isSame(subject, item, 'ais-live-vessels', 'mmsi'));
-  const installations = militaryInstallationsLayer.getNearby(position, AWARENESS_RADIUS_M, AWARENESS_QUERY_LIMIT)
-    .filter((item) => !isSame(subject, item, 'military-installations', 'id'));
   return {
     subject,
     evaluatedAt: Date.now(),
@@ -493,13 +459,6 @@ function evaluateSubject(subject, sourceStates = collectSourceStates()) {
       { id: 'flights', label: 'Flights', source: flightsState.stats.source || SOURCE_LABEL.flights, summary: summarizeAwarenessCohortForNavigation(flights, flightsState) },
       { id: 'military', label: 'Military flights', source: militaryState.stats.source || SOURCE_LABEL.military, summary: summarizeAwarenessCohortForNavigation(military, militaryState) },
       { id: 'ais-live-vessels', label: 'AIS vessels', source: vesselsState.stats.source || SOURCE_LABEL['ais-live-vessels'], summary: summarizeAwarenessCohortForNavigation(vessels, vesselsState) },
-      {
-        id: 'military-installations',
-        label: 'Mapped installations',
-        source: installationsState.stats.source || SOURCE_LABEL['military-installations'],
-        coverage: 'CURRENT VIEWPORT ONLY',
-        summary: summarizeInstallationViewport(installations, installationsState),
-      },
     ],
   };
 }
@@ -535,13 +494,6 @@ function focusNearbyTarget(layerId, id, { origin = 'programmatic' } = {}) {
   }
   if (layerId === 'military') {
     return militaryFlightsLayer.refocusTrackedById?.(id, { origin }) || militaryFlightsLayer.trackById(id, { origin });
-  }
-  if (layerId === 'military-installations') {
-    if (!contextTargetFlyToAllowed(layerId)) return selectKnownContextTarget(layerId, id);
-    // focusById flies the camera; it never assigns a tracked entity, so the
-    // stamp has to be announced here.
-    announceNavigationAuthority('context-installation-focus');
-    return militaryInstallationsLayer.focusById(id);
   }
   if (layerId !== 'ais-live-vessels' || !aisLiveVesselsLayer.selectById(id)) return false;
 
@@ -584,27 +536,6 @@ export function _getAwarenessNavigationStateForTest() {
     suppressedHistoryKey: state.suppressedHistoryKey,
     pendingSelectionKey: state.pendingSelectionKey,
   };
-}
-
-function selectKnownContextTarget(layerId, id) {
-  const key = `${layerId}:${id}`;
-  const known = [
-    state.subject,
-    ...state.navigationHistory,
-    ...(state.results?.cohorts || []).flatMap((cohort) => (
-      cohort.id === layerId ? (cohort.summary.navigationNearest || cohort.summary.nearest || []) : []
-    )),
-  ].find((item) => item && `${item.layerId || layerId}:${item.id || item.mmsi}` === key);
-  if (!known?.position) return false;
-  if (contextTargetFlyToAllowed(layerId)) releaseAircraftTracking();
-  selectSubject({
-    ...known,
-    layerId,
-    id: String(known.id || known.mmsi),
-    label: known.label || known.name || known.callsign || String(id),
-    position: Cesium.Cartesian3.clone(known.position),
-  });
-  return true;
 }
 
 function requestFocus(layerId, id, preserveHistory = false, { origin = 'programmatic' } = {}) {
@@ -1288,8 +1219,6 @@ function resolveSubjectPosition(subject, { allowCollectionMaterialization = true
       aisLiveVesselsLayer,
     );
   }
-  // Mapped installations come from static geometry, not a live feed: there is
-  // nothing to be culled from.
   return { position: Cesium.Cartesian3.clone(subject.position), presence: SUBJECT_PRESENCE.LIVE };
 }
 
@@ -1398,7 +1327,7 @@ function refreshSelectedSubject(force = false) {
 }
 
 function subjectFromContext(record) {
-  if (!record || !['ais-live-vessels', 'military-installations'].includes(record.layerId)) return null;
+  if (record?.layerId !== 'ais-live-vessels') return null;
   const latitude = Number(record.latitude);
   const longitude = Number(record.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
@@ -1603,7 +1532,7 @@ async function enableDependencies(activationId = state.activationId) {
     if (AIRCRAFT_DEPENDENCIES.includes(layerId)) {
       aircraftPending.push(pending);
     } else {
-      // Vessels and mapped installations enrich an already usable aircraft
+      // Vessels enrich an already usable aircraft
       // context. Their settlement must never hold the Contacts transaction or
       // Cockpit gate open, and the activation token prevents a late result
       // from repainting or refocusing a newer/closed session.

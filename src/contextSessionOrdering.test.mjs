@@ -161,7 +161,7 @@ test('every user-facing Context exit route settles through the failure surface',
     src.indexOf('_initGlobalContextPanel() {'),
     src.indexOf('_captureContextSessionSnapshot(', src.indexOf('_initGlobalContextPanel() {')),
   );
-  assert.equal((initPanel.match(/void this\._runUserFacingContextAction/g) || []).length, 3);
+  assert.equal((initPanel.match(/void this\._runUserFacingContextAction/g) || []).length, 2);
   assert.doesNotMatch(initPanel, /falseIsFailure:\s*false/);
   assert.doesNotMatch(initPanel, /void this\._selectContextMode/);
 

@@ -2129,7 +2129,7 @@ test('layer parameter snapshots are detached from module-owned nested state', ()
 });
 
 test('feed state: guidance statuses are normal operation, not faults', () => {
-  // The Military Installations wide-view prompt: zoom/search guidance must
+  // Zoom/search guidance must
   // never read DEGRADED — waiting for user action is instruction, not fault.
   assert.equal(layerFeedState({ status: 'zoom-in', error: 'zoom in to search', count: 12 }), 'nominal');
   assert.equal(layerFeedState({ status: 'idle' }), 'nominal');

@@ -128,8 +128,8 @@ test('the two Context/Cockpit tools pin their enums and required arguments', () 
   );
   assert.deepEqual(
     cockpit.parameters.properties.targetLayer.enum,
-    ['flights', 'military', 'ais-live-vessels', 'military-installations'],
-    'the layer filter must match the four Context cohorts exactly',
+    ['flights', 'military', 'ais-live-vessels'],
+    'the layer filter must match the three Context cohorts exactly',
   );
   // aircraftClass is deliberately open (free-form class names), but still typed.
   assert.equal(cockpit.parameters.properties.aircraftClass.type, 'string');
@@ -168,7 +168,7 @@ test('the edited existing tools changed exactly as intended', () => {
   // Edit 5: the weather and military layers are voice-addressable.
   for (const toolName of ['set_layer_visibility', 'show_data_layers_menu']) {
     const layerEnum = byName.get(toolName).parameters.properties.layerId.enum;
-    for (const layerId of ['military-installations', 'noaa-alerts', 'aviation-sigmets']) {
+    for (const layerId of ['noaa-alerts', 'aviation-sigmets']) {
       assert.ok(layerEnum.includes(layerId), `${toolName} must offer ${layerId}`);
     }
   }

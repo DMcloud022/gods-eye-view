@@ -88,13 +88,6 @@ export const DATA_CREDITS = [
       '(ODbL 1.0)',
   },
   {
-    key: 'military-installations-osm',
-    html:
-      'Mapped installation context: ' +
-      '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a> ' +
-      '(ODbL 1.0; incomplete mapped context)',
-  },
-  {
     key: 'cockpit-place-osm',
     html:
       'Cockpit place context: ' +

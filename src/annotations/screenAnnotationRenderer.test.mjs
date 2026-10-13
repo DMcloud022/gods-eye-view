@@ -232,7 +232,7 @@ test('annotation fade consumes the actual tracked host paint rectangle after lay
   const renderer = createScreenAnnotationRenderer(
     { scene, camera, trackedEntity: null },
     {
-      activeTrackedReadoutId: () => 'installations:test',
+      activeTrackedReadoutId: () => 'flights:test',
       overlayPaintRect(sourceId, entryId) {
         paintRectCalls.push({ sourceId, entryId });
         return { x: -10, y: -10, w: 120, h: 80 };
@@ -250,7 +250,7 @@ test('annotation fade consumes the actual tracked host paint rectangle after lay
   const { group } = findAnnotationGroup(globalThis.document);
   assert.deepEqual(paintRectCalls.at(-1), {
     sourceId: 'tracked',
-    entryId: 'installations:test',
+    entryId: 'flights:test',
   });
   assert.ok(
     Number(group.getAttribute('opacity')) < 1,

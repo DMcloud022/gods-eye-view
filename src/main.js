@@ -14,7 +14,6 @@ import bikeshareLayer from './data/bikeshare.js';
 import aisLiveVesselsLayer from './data/aisLiveVessels.js';
 import noaaAlertsLayer from './data/noaaAlerts.js';
 import aviationSigmetsLayer from './data/aviationSigmets.js';
-import militaryInstallationsLayer from './data/militaryInstallations.js';
 import militaryAwarenessLayer from './data/militaryAwareness.js';
 import localDataLayers from './data/localLayers.js';
 import { LAYER_STATE_REGISTRY } from './data/layerState.js';
@@ -246,7 +245,6 @@ async function init() {
     dataManager.register(aisLiveVesselsLayer);
     dataManager.register(noaaAlertsLayer);
     dataManager.register(aviationSigmetsLayer);
-    dataManager.register(militaryInstallationsLayer);
     dataManager.register(militaryAwarenessLayer);
     militaryAwarenessLayer.attachDataManager(dataManager);
     for (const layer of localDataLayers) {

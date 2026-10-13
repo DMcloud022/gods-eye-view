@@ -65,21 +65,15 @@ export function cockpitAltitudeDisplayFt(altitudeM, onGround) {
   return Number.isFinite(altitudeM) ? altitudeM * 3.28084 : null;
 }
 
-/** Format the cockpit Context scope without overstating installation coverage. */
-export function formatCockpitContextScope(subjectLabel, radiusM, installationCoverage = null) {
+/** Format the cockpit Context scope. */
+export function formatCockpitContextScope(subjectLabel, radiusM) {
   const normalizedLabel = typeof subjectLabel === 'string'
     ? subjectLabel.trim() || '—'
     : Number.isFinite(subjectLabel) ? String(subjectLabel) : '—';
   const radiusKm = Number.isFinite(radiusM) && radiusM >= 0
     ? String(Math.round(radiusM / 1000))
     : '—';
-  const coverage = typeof installationCoverage === 'string'
-    ? installationCoverage.trim()
-    : '';
-  const base = `${normalizedLabel} · ${radiusKm} KM AIR/SEA WINDOW`;
-  return coverage
-    ? `${base} · INSTALLATIONS ${coverage}`
-    : base;
+  return `${normalizedLabel} · ${radiusKm} KM AIR/SEA WINDOW`;
 }
 
 /** Return seven 30-degree compass divisions centered on a heading. */

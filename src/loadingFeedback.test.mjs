@@ -582,25 +582,25 @@ test('new busy work replaces confirmation and force-show remains bounded', () =>
   assert.equal(state.visible, false);
 });
 
-test('aggregates Mapped Installations refresh beside CCTV without changing either owner', () => {
+test('aggregates Live AIS Vessels refresh beside CCTV without changing either owner', () => {
   const summary = aggregateLayerLoading([
     {
       id: 'cctv', name: 'CCTV', enabled: true, lifecycleState: 'enabled',
       stats: { count: 500, lastUpdate: 10, loading: true },
     },
     {
-      id: 'military-installations', name: 'Mapped Installations', enabled: true,
+      id: 'ais-live-vessels', name: 'Live AIS Vessels', enabled: true,
       lifecycleState: 'enabled',
       stats: { count: 4, lastUpdate: 20, loading: true },
     },
   ]);
-  assert.deepEqual(summary.activeIds, ['cctv', 'military-installations']);
+  assert.deepEqual(summary.activeIds, ['cctv', 'ais-live-vessels']);
   assert.equal(summary.refresh, true);
   const pending = reduceLoadingFeedback(createLoadingFeedbackState(), summary, 0);
   const visible = reduceLoadingFeedback(pending, summary, 200);
   assert.deepEqual(
     presentLoadingFeedback(visible, summary, 200),
-    { state: 'refresh', label: 'REFRESHING LIVE DATA', detail: 'CCTV · Mapped Installations' },
+    { state: 'refresh', label: 'REFRESHING LIVE DATA', detail: 'CCTV · Live AIS Vessels' },
   );
 });
 

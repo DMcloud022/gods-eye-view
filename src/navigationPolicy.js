@@ -13,8 +13,8 @@ export const NAVIGATION_AUTHORITY_EVENT = 'gev:navigation-authority-taken';
  * Announce that a layer-owned camera flight is taking navigation authority.
  *
  * Aircraft focus reaches the stamp for free: it assigns `viewer.trackedEntity`,
- * and the UI stamps on `trackedEntityChanged`. Vessel and installation focus
- * fly the camera WITHOUT ever setting a tracked entity, so they have no such
+ * and the UI stamps on `trackedEntityChanged`. Vessel focus flies the camera
+ * WITHOUT ever setting a tracked entity, so it has no such
  * seam — an earlier deferred geocode would still match the generation it
  * captured and could resolve on top of the new Context focus. This is that
  * missing seam, kept explicit so the flight and the stamp cannot drift apart.

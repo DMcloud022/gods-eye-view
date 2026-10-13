@@ -37,10 +37,7 @@ test('Cockpit has one reset action beside its bottom exit path', () => {
 
   const actions = html.match(/<div class="global-context-actions"[\s\S]*?<\/div>/);
   assert.ok(actions, 'Contact Context actions are missing');
-  assert.ok(
-    actions[0].indexOf('id="cockpit-entry"') < actions[0].indexOf('id="installations-search-btn"'),
-    'Cockpit must precede Search Nearby Sites',
-  );
+  assert.match(actions[0], /id="cockpit-entry"/, 'Cockpit entry belongs to the Contact Context actions');
   assert.match(
     css,
     /body\.cockpit-mode #view-switcher \{[\s\S]*?bottom: max\(clamp\(128px, 15vh, 150px\), env\(safe-area-inset-bottom\)\);[\s\S]*?margin-bottom: -95px;/,
@@ -744,7 +741,7 @@ test('Global Context names its mixed contact cycle without changing the stable m
   assert.ok(match, 'Global Context contacts button is missing');
   assert.match(match[0], />CONTACTS</);
   assert.match(match[0], /aria-label="CONTACTS"/);
-  assert.match(match[0], /title="Cycles the nearest contacts of whatever type you select — planes, vessels, installations\. Satellites track independently\."/);
+  assert.match(match[0], /title="Cycles the nearest contacts of whatever type you select — planes and vessels\. Satellites track independently\."/);
   assert.doesNotMatch(match[0], />FLIGHTS</);
 });
 
@@ -761,7 +758,7 @@ test('Global Context standby describes both chooser modes', () => {
     /<div id="context-mode-standby"[\s\S]*?<\/div>/,
   );
   assert.ok(match, 'Global Context standby is missing');
-  assert.match(match[0], /CONTACTS — nearest planes · vessels · sites/);
+  assert.match(match[0], /CONTACTS — nearest planes · vessels<br>/);
   assert.match(match[0], /SPACE MISSIONS — launches &amp; orbital assets/);
 });
 

@@ -71,7 +71,6 @@ import radioLayer, {
 import bikeshareLayer from './data/bikeshare.js';
 import aisLiveVesselsLayer from './data/aisLiveVessels.js';
 import militaryAwarenessLayer from './data/militaryAwareness.js';
-import militaryInstallationsLayer from './data/militaryInstallations.js';
 import rocketLaunchesLayer from './data/rocketLaunches.js';
 import {
   aggregateLayerLoading,
@@ -1731,12 +1730,9 @@ class CockpitViewController {
     this.context.hidden = false;
     this.hud?.classList.add('context-active');
     if (this.contextSubject) {
-      const installationCoverage = snapshot.cohorts
-        .find((cohort) => cohort.id === 'military-installations')?.coverage;
       this.contextSubject.textContent = formatCockpitContextScope(
         snapshot.subject.label || trackedId,
         snapshot.radiusM,
-        installationCoverage,
       );
     }
     // Navigation stays wired in every state — the operator must always be able
@@ -1799,7 +1795,7 @@ class CockpitViewController {
     }
 
     // The arrow and BRG are nose-relative to the tracked aircraft. When the
-    // subject is a vessel, an installation, or another aircraft, the rest of
+    // subject is a vessel or another aircraft, the rest of
     // this row is measured from that subject — so the aircraft-frame half is
     // dashed rather than presented alongside subject-frame distances as if the
     // two shared an origin.
@@ -2520,7 +2516,6 @@ export class StyleManager {
     this._dataManagerBeforeDestroyUnsubscribe = null;
     this._dataManagerVisibilityGuardUnsubscribe = null;
     this._dataManagerVisibilityRequestUnsubscribe = null;
-    this._installationsSearchBtn = document.getElementById('installations-search-btn');
     this._leftPanelStack = document.getElementById('left-panel-stack');
     this._cctvEnableBtn = document.getElementById('cctv-enable-btn');
     this._cctvNearestBtn = document.getElementById('cctv-nearest-btn');
@@ -2942,7 +2937,7 @@ export class StyleManager {
     this._navigationOwnerChangedRemover = viewer.trackedEntityChanged.addEventListener((entity) => {
       if (entity && !this._disposed) this._stampNavigation({ cancelPendingSelection: false });
     });
-    // Vessel/installation focus flies without ever assigning a tracked entity,
+    // Vessel focus flies without ever assigning a tracked entity,
     // so it cannot reach the listener above. It announces instead.
     this._removeNavigationAuthorityListener = registerNavigationAuthorityListener(
       window,
@@ -4835,27 +4830,6 @@ export class StyleManager {
         })) this.setPanelCollapsed('global-context-panel', false, { explicit: true });
       });
     });
-    this._installationsSearchBtn?.addEventListener('click', () => {
-      if (!this._dataManager?.layers?.has('military-installations')) return;
-      const button = this._installationsSearchBtn;
-      button.disabled = true;
-      void this._runUserFacingContextAction(async (notificationToken) => {
-        const enabled = await this._dataManager.setEnabled('military-installations', true, {
-          origin: 'user',
-          notificationToken,
-        });
-        if (enabled === false || !this._dataManager.isEnabled('military-installations')) return false;
-        const searched = await militaryInstallationsLayer.searchNearby?.();
-        if (searched === false) return false;
-        const stats = militaryInstallationsLayer.getStats?.();
-        this._showToast(stats?.status === 'zoom-in'
-          ? 'Zoom in to search mapped installations'
-          : 'Nearby installations refreshed');
-        return true;
-      }, 'Nearby installations could not be refreshed; try again').finally(() => {
-        button.disabled = false;
-      });
-    });
   }
 
   async _runUserFacingContextAction(
@@ -5442,7 +5416,7 @@ export class StyleManager {
         }
       } else if (
         this._contextMode === 'flights'
-        && ['flights', 'military', 'ais-live-vessels', 'military-installations'].includes(change.layerId)
+        && ['flights', 'military', 'ais-live-vessels'].includes(change.layerId)
         && !change.enabled
       ) {
         void this._trackContextLayerReaction(this._runUserFacingContextAction((notificationToken) => (
@@ -8524,8 +8498,8 @@ export class StyleManager {
    *
    * Reuses the filtered Context navigation NEXT already uses, so "cockpit in
    * that military helicopter" lands on the same contact "next military
-   * helicopter" would. Cockpit flies aircraft only; vessel and installation
-   * layers are refused by name rather than silently ignored.
+   * helicopter" would. Cockpit flies aircraft only; vessel layers are
+   * refused by name rather than silently ignored.
    * @param {object} options Retarget request.
    * @param {string} options.targetLayer Requested contact layer.
    * @param {string|null} options.aircraftClass Optional class filter.
@@ -8567,7 +8541,7 @@ export class StyleManager {
    * @param {'enter'|'exit'|'next'|'previous'|'status'} action - Cockpit action.
    * @param {object} [options]
    * @param {string|Symbol|null} [options.notificationToken]
-   * @param {'flights'|'military'|'ais-live-vessels'|'military-installations'|null} [options.targetLayer]
+   * @param {'flights'|'military'|'ais-live-vessels'|null} [options.targetLayer]
    * @param {string|null} [options.aircraftClass]
    * @param {{layerId:'flights'|'military',id:string}|null} [options.selectedTarget]
    * @param {{layerId:'flights'|'military',id:string}|null} [options.rollbackTarget]

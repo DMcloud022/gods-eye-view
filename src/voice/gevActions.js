@@ -139,7 +139,7 @@ const COCKPIT_ACTION_ALIASES = new Map([
   ['next closest military', 'next'],
   ['go to next', 'next'],
 ]);
-const COCKPIT_TARGET_LAYERS = new Set(['flights', 'military', 'ais-live-vessels', 'military-installations']);
+const COCKPIT_TARGET_LAYERS = new Set(['flights', 'military', 'ais-live-vessels']);
 
 const LAYER_ALIASES = new Map([
   ['flights', 'flights'],
@@ -147,11 +147,6 @@ const LAYER_ALIASES = new Map([
   ['aircraft', 'flights'],
   ['military', 'military'],
   ['military flights', 'military'],
-  ['military-installations', 'military-installations'],
-  ['military installations', 'military-installations'],
-  ['installations', 'military-installations'],
-  ['military bases', 'military-installations'],
-  ['bases', 'military-installations'],
   ['military-awareness', 'military-awareness'],
   ['military awareness', 'military-awareness'],
   ['airspace awareness', 'military-awareness'],
@@ -2148,11 +2143,9 @@ function normalizeCockpitNavigationHints(rawAction) {
 
   const targetLayer = raw.includes('vessel') || raw.includes('ship') || raw.includes('ais')
     ? 'ais-live-vessels'
-    : raw.includes('installation') || raw.includes('facility') || raw.includes('base')
-      ? 'military-installations'
-      : raw.includes('military')
-        ? 'military'
-        : null;
+    : raw.includes('military')
+      ? 'military'
+      : null;
 
   const aircraftClass = raw.includes('helicopter') || raw.includes('helo') || raw.includes('chopper')
     ? 'helicopter'

@@ -170,16 +170,16 @@ test('tracked entity publishes a protected host entry backed by the frame cache'
   }
 });
 
-test('selection lifecycle ignores vessels, accepts installations, and clears without stale cards', () => {
+test('selection events never publish a card and destroy clears without stale cards', () => {
   const originalWindow = globalThis.window;
   const fakeWindow = new EventTarget();
   const changed = makeCesiumEvent();
   const viewer = { trackedEntity: null, trackedEntityChanged: changed };
   const recorder = makeHostRecorder();
-  const installation = {
-    gevTrackedId: 'installations:fort-test',
+  const vessel = {
+    gevTrackedId: 'ais:test',
     gevDisplayPosition: () => ({ x: 1, y: 2, z: 3 }),
-    gevLabelModel: { title: 'FORT TEST', details: ['AIRFIELD'], accent: '#5aa9ff' },
+    gevLabelModel: { title: 'TEST VESSEL', details: ['CARGO'], accent: '#5aa9ff' },
   };
   globalThis.window = fakeWindow;
   _setTrackedOverlayHostForTest(recorder.host);
@@ -187,30 +187,10 @@ test('selection lifecycle ignores vessels, accepts installations, and clears wit
     initTrackedReadout(viewer);
     const setsBefore = recorder.calls.filter(({ op }) => op === 'set').length;
     fakeWindow.dispatchEvent(new CustomEvent('gev:entity-selected', {
-      detail: { layerId: 'ais-live-vessels', entity: installation },
+      detail: { layerId: 'ais-live-vessels', entity: vessel },
     }));
     assert.equal(recorder.calls.filter(({ op }) => op === 'set').length, setsBefore);
-
-    fakeWindow.dispatchEvent(new CustomEvent('gev:entity-selected', {
-      detail: { layerId: 'military-installations', entity: installation },
-    }));
-    assert.equal(getActiveTrackedReadoutId(), 'installations:fort-test');
-    assert.equal(recorder.calls.filter(({ op }) => op === 'set').at(-1).entries[0].title, 'FORT TEST');
-
-    fakeWindow.dispatchEvent(new CustomEvent('gev:entity-selected', {
-      detail: { layerId: 'ais-live-vessels', entity: installation },
-    }));
-    assert.equal(getActiveTrackedReadoutId(), null, 'sibling selection clears an installation card');
-
-    fakeWindow.dispatchEvent(new CustomEvent('gev:entity-selected', {
-      detail: { layerId: 'military-installations', entity: installation },
-    }));
-
-    fakeWindow.dispatchEvent(new CustomEvent('gev:entity-selection-cleared', {
-      detail: { layerId: 'military-installations' },
-    }));
     assert.equal(getActiveTrackedReadoutId(), null);
-    assert.ok(recorder.calls.some(({ op }) => op === 'clear'));
 
     const clearsBeforeDestroy = recorder.calls.filter(({ op }) => op === 'clear').length;
     destroyTrackedReadout();
@@ -243,7 +223,6 @@ test('tracking layers write gevLabelModel and expose only their cached display p
     'flights.js',
     'militaryFlights.js',
     'satellites.js',
-    'militaryInstallations.js',
   ].map(async (name) => [name, await readFile(new URL(`./${name}`, import.meta.url), 'utf8')]));
   const sources = Object.fromEntries(files);
   for (const [name, source] of files) {

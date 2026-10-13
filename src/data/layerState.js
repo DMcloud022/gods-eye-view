@@ -286,7 +286,6 @@ export const LAYER_STATE_REGISTRY = Object.freeze([
   Object.freeze({ id: 'local-firms', token: 'w', disposition: 'enabled-only' }),
   Object.freeze({ id: 'military', token: 'm', disposition: 'enabled+mirrored-options', optionOwner: 'flights' }),
   Object.freeze({ id: 'military-awareness', token: 'g', disposition: 'enabled-only' }),
-  Object.freeze({ id: 'military-installations', token: 'i', disposition: 'enabled-only' }),
   Object.freeze({ id: 'noaa-alerts', token: 'n', disposition: 'enabled-only' }),
   Object.freeze({ id: 'radio', token: 'r', disposition: 'enabled+options', optionOwner: 'radio' }),
   Object.freeze({ id: 'rocket-launches', token: 'x', disposition: 'enabled-only' }),
@@ -296,6 +295,9 @@ export const LAYER_STATE_REGISTRY = Object.freeze([
 ]);
 
 export const REGISTERED_LAYER_IDS = Object.freeze(LAYER_STATE_REGISTRY.map((entry) => entry.id));
+// Tokens of removed layers: never reassign, and drop them when decoding old links.
+// 'i' was the retired 'military-installations' layer.
+const RETIRED_LAYER_TOKENS = Object.freeze(new Set(['i']));
 
 const REGISTRY_BY_ID = new Map(LAYER_STATE_REGISTRY.map((entry) => [entry.id, entry]));
 const REGISTRY_BY_TOKEN = new Map(LAYER_STATE_REGISTRY.map((entry) => [entry.token, entry]));
@@ -340,6 +342,7 @@ export function validateLayerStateRegistry(registry = LAYER_STATE_REGISTRY) {
     ids.add(entry.id);
     if (!/^[a-z0-9]$/.test(entry.token || '')) throw new Error(`Invalid layer-state token: ${entry.id}`);
     if (tokens.has(entry.token)) throw new Error(`Duplicate layer-state token: ${entry.token}`);
+    if (RETIRED_LAYER_TOKENS.has(entry.token)) throw new Error(`Retired layer-state token: ${entry.token}`);
     tokens.add(entry.token);
     if (!VALID_DISPOSITIONS.has(entry.disposition)) {
       throw new Error(`Invalid layer-state disposition: ${entry.id}`);
@@ -451,7 +454,7 @@ export function decodeLayerStateParams(params) {
   // Fail closed on an oversized payload rather than decoding a truncated one.
   if (rawLayers.length > MAX_ENABLED_LAYERS_CHARS) return null;
   if (rawOptionsField.length > MAX_LAYER_OPTIONS_CHARS) return null;
-  const layerTokens = rawLayers.split('.').filter(Boolean);
+  const layerTokens = rawLayers.split('.').filter((token) => token && !RETIRED_LAYER_TOKENS.has(token));
   // `l=` is the one valid explicit-empty representation. Any non-empty token
   // set containing an unknown member rejects the complete layer payload so a
   // typo or future token cannot silently become an authoritative empty set.

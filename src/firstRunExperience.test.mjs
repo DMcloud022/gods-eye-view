@@ -652,12 +652,13 @@ test('the voice TOOL SCHEMA is byte-identical to main — the mission mapping is
   const block = src.slice(start, end + 4);
 
   // Re-baselined for the deliberate schema edits (weather + military layer
-  // enums, MapTiler/Esri/CARTO basemaps, user-facing context modes) — pinned
+  // enums, MapTiler/Esri/CARTO basemaps, user-facing context modes, retired
+  // installations layer) — pinned
   // per tool in radioMarkup.test.mjs. The missions still add no schema.
-  assert.equal(block.length, 31946, 'tool schema byte length drifted from the frozen baseline');
+  assert.equal(block.length, 31774, 'tool schema byte length drifted from the frozen baseline');
   assert.equal(
     crypto.createHash('sha256').update(block).digest('hex'),
-    '95719c1ecdfde4ad911c040553b9c3b130d24883ea7a3c0e3ffec0f2965a6d35',
+    '2ff0508dd24f94795d9638b11e8847fcc3988bfd4868e9cc33fe7f6121028777',
     'the first-run missions must ride EXISTING tools: no schema edit, no cache bust',
   );
 

@@ -65,11 +65,7 @@ test('cockpit altitude reads zero on the ground without changing airborne MSL', 
   assert.equal(cockpitAltitudeDisplayFt(null, false), null);
 });
 
-test('cockpit Context scope distinguishes radius-complete feeds from viewport installations', () => {
-  assert.equal(
-    formatCockpitContextScope('TEST123', 250000, 'CURRENT VIEWPORT ONLY'),
-    'TEST123 · 250 KM AIR/SEA WINDOW · INSTALLATIONS CURRENT VIEWPORT ONLY',
-  );
+test('cockpit Context scope labels the radius-complete air/sea window', () => {
   assert.equal(
     formatCockpitContextScope('TEST123', 250000),
     'TEST123 · 250 KM AIR/SEA WINDOW',
@@ -82,7 +78,7 @@ test('cockpit Context scope preserves zero and replaces missing values intention
     '— · 0 KM AIR/SEA WINDOW',
   );
   assert.equal(
-    formatCockpitContextScope(undefined, Number.NaN, {}),
+    formatCockpitContextScope(undefined, Number.NaN),
     '— · — KM AIR/SEA WINDOW',
   );
 });
@@ -251,13 +247,12 @@ test('Contact panel hides only when there is no snapshot at all', () => {
   );
 });
 
-test('Contact panel survives NEXT onto a vessel or installation subject', () => {
+test('Contact panel survives NEXT onto a vessel or military subject', () => {
   // The panel owns the NEXT button. Hiding it because the subject is not the
   // tracked aircraft strands the operator with no way back (this was observed on
   // camera: "click next... whole left panel disappears").
   for (const subject of [
     { layerId: 'ais-live-vessels', id: '353136000', label: 'MAERSK DETROIT' },
-    { layerId: 'military-installations', id: 'fort-hood', label: 'FORT CAVAZOS' },
     { layerId: 'military', id: 'ae01ce', label: 'RCH451' },
   ]) {
     const readout = resolveCockpitContextReadout({

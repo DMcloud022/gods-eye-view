@@ -4096,7 +4096,7 @@ body.cockpit-mode #intel-hud .hud-right-edge { right: 22px; }
   .cockpit-context-header { grid-template-columns: 1fr auto; }
   .cockpit-context-qualifier { display: none; }
   .cockpit-context-cohorts small { display: none; }
-  .cockpit-context-cohorts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .cockpit-context-cohorts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .cockpit-context-cohorts > div { padding: 4px 6px; }
   .cockpit-context-nearest { grid-template-columns: 20px minmax(0, 1fr) auto; gap: 6px; }
   #cockpit-context-bearing { display: none; }
@@ -5390,17 +5390,14 @@ body.cockpit-mode #intel-hud .hud-right-edge { right: 22px; }
 .context-radio-mini-volume input { width: 100%; }
 .global-context-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   margin: 0 0 8px;
 }
-.global-context-actions:has(#installations-search-btn) { grid-template-columns: minmax(0, 1fr); }
-.global-context-actions:has(#cockpit-entry:not([hidden])) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.global-context-actions:has(#cockpit-entry[hidden]) { grid-template-columns: 1fr; }
+.global-context-actions:not(:has(> :not([hidden]))) { display: none; }
 /* TR-3B reclassify toggle rides an `auto` trailing column so the chip never
-   resizes the COCKPIT / SEARCH buttons beside it. */
-.global-context-actions:has(#tr3b-toggle:not([hidden])) { grid-template-columns: repeat(2, minmax(0, 1fr)) auto; }
-.global-context-actions:has(#cockpit-entry[hidden]):has(#tr3b-toggle:not([hidden])) { grid-template-columns: minmax(0, 1fr) auto; }
+   resizes the COCKPIT button beside it. */
+.global-context-actions:has(#tr3b-toggle:not([hidden])) { grid-template-columns: minmax(0, 1fr) auto; }
 .tr3b-toggle {
   width: 26px;
   min-height: 30px;

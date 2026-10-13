@@ -7,7 +7,6 @@ import createViteConfig, {
   LL2_CACHE_TTL_MS,
   readResponseJsonCapped,
   regionalBriefHasAnySource,
-  validMilitaryInstallationBox,
   validRegionalPoint,
 } from '../../vite.config.js';
 
@@ -22,10 +21,6 @@ test('regional proxy rejects absent and blank coordinates instead of coercing th
 });
 
 test('adjacent proxy validators also require every coordinate explicitly', () => {
-  assert.equal(
-    validMilitaryInstallationBox(new URLSearchParams('west=-1&north=1&east=1')),
-    null,
-  );
   assert.equal(adsbLolFallbackAnchor({ url: '?lat=12.5' }), null);
   assert.equal(adsbLolFallbackAnchor({ url: '?lon=12.5' }), null);
 });
@@ -35,7 +30,6 @@ test('new data proxies install the same routes in dev and preview servers', () =
   const byName = new Map(config.plugins.map((plugin) => [plugin.name, plugin]));
   for (const name of [
     'rocket-launches-proxy',
-    'military-installations-proxy',
     'regional-brief-proxy',
     'weather-effects-proxy',
   ]) {

@@ -155,12 +155,16 @@ function encode(state) {
 
 test('production registry is exact, canonical, and rejects incomplete contracts', async () => {
   assert.equal(validateLayerStateRegistry(), true);
-  assert.equal(REGISTERED_LAYER_IDS.length, 18);
-  assert.equal(new Set(REGISTERED_LAYER_IDS).size, 18);
+  assert.equal(REGISTERED_LAYER_IDS.length, 17);
+  assert.equal(new Set(REGISTERED_LAYER_IDS).size, 17);
   assert.deepEqual(REGISTERED_LAYER_IDS, [...REGISTERED_LAYER_IDS].sort());
   assert.throws(
     () => validateLayerStateRegistry([...LAYER_STATE_REGISTRY, LAYER_STATE_REGISTRY[0]]),
     /Duplicate layer-state id/,
+  );
+  assert.throws(
+    () => validateLayerStateRegistry([...LAYER_STATE_REGISTRY, { id: 'reused', token: 'i', disposition: 'enabled-only' }]),
+    /Retired layer-state token/,
   );
 
   const manager = new DataLayerManager({});
@@ -225,6 +229,18 @@ test('v2 codec distinguishes absent from empty and keeps canonical deterministic
 test('unknown enabled-layer tokens reject the payload instead of becoming an empty set', () => {
   assert.equal(decodeLayerStateParams(new URLSearchParams('v=2&l=z')), null);
   assert.equal(decodeLayerStateParams(new URLSearchParams('v=2&l=c.z')), null);
+});
+
+test('retired layer tokens in old links are dropped without rejecting the payload', () => {
+  assert.deepEqual(
+    decodeLayerStateParams(new URLSearchParams('v=2&l=e.i.m')).enabledLayerIds,
+    ['earthquakes', 'military'],
+  );
+  assert.deepEqual(decodeLayerStateParams(new URLSearchParams('v=2&l=i')).enabledLayerIds, []);
+  assert.deepEqual(
+    parseStoredLayerState(JSON.stringify({ v: 2, l: ['military-installations', 'flights'], o: {} })).enabledLayerIds,
+    ['flights'],
+  );
 });
 
 test('unknown and forbidden option fields are ignored while missing options use codec defaults', () => {
