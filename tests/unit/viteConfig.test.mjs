@@ -134,3 +134,25 @@ test('keyless EONET fires are not clamped to the FIRMS trailing 24 h', () => {
 test('radio broad query stays under the per-mirror timeout (limit 500 took ~25 s)', () => {
   assert.match(CONFIG, /limit: index === 0 \? '300' : '220'/);
 });
+
+test('OpenSky proxy never makes a poll wait on the ~25 s world-snapshot download', () => {
+  const refresh = CONFIG.slice(CONFIG.indexOf('async function refreshOpenSkySnapshot('), CONFIG.indexOf('function startOpenSkyRefresh('));
+  assert.equal((refresh.match(/states\/all\?extended=1', \{ headers(?:: retryHeaders)?, signal \}/g) || []).length, 2, 'upstream fetches need a timeout');
+  assert.match(refresh, /if \(upstream\.ok\) \{\s*_openskyCacheBody = body;/, 'the shared refresh must fill the cache itself');
+  const handler = CONFIG.slice(CONFIG.indexOf("middlewares.use('/api/opensky', async"), CONFIG.indexOf("middlewares.use('/api/opensky-track'"));
+  assert.ok(!handler.includes("fetch('https://opensky-network.org"), 'handler must go through startOpenSkyRefresh');
+  assert.match(handler, /inCooldown \|\| _openskyRefreshInFlight\)\)/, 'expired cache is served while a refresh runs');
+  assert.match(handler, /OPENSKY_COLD_WAIT_MS[\s\S]{0,200}opensky_slow_regional_fallback/, 'cold start falls back after a short wait');
+});
+
+test('CelesTrak proxy serves stale TLEs while it revalidates (bulk groups took ~18 s)', () => {
+  const proxy = CONFIG.slice(CONFIG.indexOf('function celestrakProxy()'), CONFIG.indexOf("name: 'celestrak-proxy'"));
+  assert.match(proxy, /if \(entry\) \{\s*send\(200, entry\.body, 'STALE-REVALIDATING'\);\s*return;\s*\}\s*const fresh = await inflight\.get\(group\);/);
+});
+
+test('adsbdb proxy rate-limits only upstream lookups, never cached answers', () => {
+  const proxy = CONFIG.slice(CONFIG.indexOf('function adsbdbProxy()'), CONFIG.indexOf("name: 'adsbdb-proxy'"));
+  assert.match(proxy, /if \(fresh\(store\[key\]\) \|\| _enrichmentRateLimiter\(clientKey\(req\)\)\) return false;/);
+  assert.match(proxy, /if \(limited\(cache\.routes, cs\)\) return;\s*const data = await lookup\('route', cs\);/);
+  assert.match(proxy, /if \(limited\(cache\.aircraft, hex\)\) return;\s*const data = await lookup\('aircraft', hex\);/);
+});

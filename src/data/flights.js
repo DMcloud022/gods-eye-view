@@ -787,7 +787,7 @@ const _enrichSeen = new Set();
 function _enqueueEnrich(key, url, onData, priority = false) {
   if (_enrichSeen.has(key)) return;
   _enrichSeen.add(key);
-  const job = { url, onData };
+  const job = { key, url, onData };
   // Priority (tracked / model-eligible) goes to the FRONT so a deep ambient
   // backlog can never delay the plane the user just clicked or zoomed into.
   if (priority) _enrichQueue.unshift(job); else _enrichQueue.push(job);
@@ -810,7 +810,17 @@ function _drainEnrich() {
     const job = _enrichQueue.shift();
     _enrichActive += 1;
     fetch(job.url)
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        // Proxy rate limit: retry this key after Retry-After instead of losing
+        // it for the session. A cleared seen-set means the layer was disabled.
+        if (r.status === 429 && _enrichSeen.has(job.key)) {
+          const retryMs = (Number(r.headers.get('Retry-After')) || 5) * 1000;
+          _enrichLastDispatchMs = Math.max(_enrichLastDispatchMs, Date.now() + retryMs - ENRICH_DISPATCH_GAP_MS);
+          _enrichQueue.unshift(job);
+          return null;
+        }
+        return r.ok ? r.json() : null;
+      })
       .then((data) => { if (data && data.found) job.onData(data); })
       .catch(() => { /* enrichment never surfaces errors */ })
       .finally(() => { _enrichActive -= 1; _drainEnrich(); });

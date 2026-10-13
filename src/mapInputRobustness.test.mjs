@@ -70,3 +70,18 @@ test('autocomplete proxy only uses a User-Agent defined in its own scope', () =>
   assert.match(fn, /const PHOTON_UA = /);
   assert.match(fn, /'User-Agent': PHOTON_UA/);
 });
+
+test('cctv warms every camera floor cell in one batch when the catalog loads', () => {
+  const src = read('src/data/cctv.js');
+  const start = src.indexOf('const priorsPromise = resolveGroundPriors(catalog);');
+  assert.ok(start > 0);
+  // Without this, the staggered geometry queue sent ~110 one-cell requests per enable.
+  assert.match(src.slice(start, start + 500), /warmGroundFloor\(catalog\);/);
+});
+
+test('flight enrichment re-queues a rate-limited lookup instead of dropping it', () => {
+  const src = read('src/data/flights.js');
+  const drain = src.slice(src.indexOf('function _drainEnrich()'), src.indexOf('function _requestTypeEnrichment('));
+  assert.match(drain, /r\.status === 429 && _enrichSeen\.has\(job\.key\)/);
+  assert.match(drain, /_enrichQueue\.unshift\(job\);/);
+});

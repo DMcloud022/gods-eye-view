@@ -176,8 +176,9 @@ async function init() {
         onlyUsingWithGoogleGeocoder: true,
       });
       viewer.scene.primitives.add(tileset);
-      // Higher-fidelity street-level tiles — default SSE is 16
-      tileset.maximumScreenSpaceError = 8;
+      // Cesium's default SSE (16). 8 fetched about twice the tiles on open
+      // (~190 MB vs ~90 MB in the first 30 s) with no visible difference.
+      tileset.maximumScreenSpaceError = 16;
       // Pre-load tiles ahead of camera movement for smoother flight
       tileset.preloadFlightDestinations = true;
       tileset.preloadAncestors = true;

@@ -4228,6 +4228,10 @@ const cctvLayer = {
     // every regime); a cold/slow upstream loses the race and the batch
     // applies post-hoc via applyLateGroundPriors instead of hanging init.
     const priorsPromise = resolveGroundPriors(catalog);
+    // The priors are cached per exact coordinate, but the shared floor reads
+    // coarse cells. Warm every camera's cell in one chunked batch now, so the
+    // staggered geometry queue does not send one tiny request per camera.
+    warmGroundFloor(catalog);
     const priors = await Promise.race([
       priorsPromise,
       new Promise((resolve) => setTimeout(() => resolve(null), GROUND_PRIOR_INIT_WAIT_MS)),
