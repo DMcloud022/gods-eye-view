@@ -162,14 +162,6 @@ This is the current runtime/source-of-truth snapshot for the project.
 >     a position, `firstConnectPhase` stays `'loading'` and `getStats()` reports
 >     `loading: true`, `lastUpdate: null`, count 0, and an UNDEFINED status.
 >     Without the predicate that window prints an all-clear `0`.
->   - **Mapped installations never reaches that window.**
->     `militaryInstallations.enable()` is synchronous and the manager awaits
->     `update()`, which owns the first Overpass fetch, so the lifecycle stays
->     `enabling` for the whole fetch and the pre-existing `enabling` branch
->     covers it. Confirmed live on :4272 across a held 17 s first fetch (34
->     samples, `enabling` throughout, panel non-numeric) and across a failing
->     one. Its `status: 'idle'` is not what saves it — the lifecycle is; the
->     module has no `loading` status at all.
 >
 >   Any new dependency that can be slow must report `loading` and `lastUpdate`
 >   honestly for the contract to hold, and must be pinned against the shape its
@@ -640,9 +632,7 @@ This is the current runtime/source-of-truth snapshot for the project.
 >   Slow disable work is labeled as turning live data off rather than
 >   as a completed load. Street Traffic's dedicated sync chip shows genuine
 >   work and one bounded completion; steady TomTom coverage, including 0%, does
->   not keep it open. Mapped Installations reports its bounded camera-driven
->   requests to the same shared surface, but full-globe `zoom-in` guidance is
->   not presented as loading. Terminal completion, cancellation, and failure
+>   not keep it open. Terminal completion, cancellation, and failure
 >   labels are centered in that surface without an empty detail slot. The circular `RESET GLOBE` action sits beside the top-center share
 >   control in map view; Cockpit hides the complete action group and provides a
 >   cockpit-styled `RESET` beside `EXIT COCKPIT`. Both resets share one route
@@ -851,9 +841,9 @@ This is the current runtime/source-of-truth snapshot for the project.
 >   Because the panel hosts its own Previous/Next controls, the ONLY condition
 >   that hides it is the absence of a context snapshot. Contact identity never
 >   gates visibility — hiding on a non-aircraft subject stranded the operator
->   the moment Next landed on a vessel or an installation.
+>   the moment Next landed on a vessel.
 > - **Contact readout: foreign subjects and CONTACT LOST.** When the selected
->   contact is not the tracked aircraft (a vessel, an installation, another
+>   contact is not the tracked aircraft (a vessel or another
 >   aircraft), the panel stays up and keeps its label, cohort counts, nearest
 >   contact, distance and evaluated time live. Only the nose-relative direction
 >   arrow and BRG readout are dashed: those two are measured in the tracked
@@ -1049,8 +1039,7 @@ This is the current runtime/source-of-truth snapshot for the project.
 >   fade-don't-cull principle; this remains pending visual review. Cards
 >   also reproduce the former
 >   `scaleByDistance` curve (1.0× at 250 km to 0.62× at 9,000 km).
->   Mapped Military Installations create no empty native labels; selected names
->   remain in the tracked readout. Submarine-cable labels moved into the shared
+>   Submarine-cable labels moved into the shared
 >   host on 2026-08-18 (Option 2, superseding the Phase-5 Option-1 native
 >   exception): the same nearest-160 bounded cohort now publishes
 >   `ambient-label` entries on a dirty sweep with exactly two dirty
@@ -1269,8 +1258,8 @@ This is the current runtime/source-of-truth snapshot for the project.
 >   gate.
 > - **Tracked-readout ownership:** `trackedReadout.js` is now a presentation-model
 >   bridge only; it owns no canvas, projection, post-render listener, layout,
->   keyhole fade, or paint path. Civilian flights, military flights, satellites,
->   and mapped installations write explicit `gevLabelModel` objects and expose
+>   keyhole fade, or paint path. Civilian flights, military flights and satellites
+>   write explicit `gevLabelModel` objects and expose
 >   `gevDisplayPosition` getters backed by their layer-owned frame/display cache.
 >   Selected AIS vessels continue using the vessel source's protected selected
 >   card, so they do not create a duplicate tracked readout. The host registers
@@ -1394,8 +1383,7 @@ This is the current runtime/source-of-truth snapshot for the project.
 >   into a nearest-contact ping-pong. Expanded flight searches use the same reset
 >   rule. Vessel focus uses a 3 km bounding sphere at entry and during cycling.
 >   The user-facing mode is **CONTACTS**: it cycles the nearest contact of
->   whichever supported type is selected (civilian or military plane, AIS vessel,
->   or mapped installation). Satellites are explicitly outside the Awareness
+>   whichever supported type is selected (civilian or military plane, or AIS vessel). Satellites are explicitly outside the Awareness
 >   navigation cohorts and retain their independent tracking UX. The cockpit
 >   briefing opt-in is labeled `CYCLE OFF` / `CYCLE ON`, with state-specific help
 >   that distinguishes page cycling from continuously refreshed live data. The

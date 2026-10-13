@@ -1718,15 +1718,21 @@ function rocketLaunchesProxy() {
       }
       const stale = cache;
       const request = coalesceProxyRequest(inFlight, 'recent-launches', refreshUpstream);
+      // Serve the expired copy now and let the refresh (~8 s upstream) land
+      // in the cache for the next poll; only a cold start waits on it.
+      if (stale) {
+        if (!request.shared) {
+          request.promise.catch((error) => {
+            console.warn(`[launch-library-proxy] refresh failed (${error?.message || error}) — keeping stale cache`);
+          });
+        }
+        send(res, 200, stale.body, 'STALE-REVALIDATING');
+        return;
+      }
       try {
         const fresh = await request.promise;
         send(res, 200, fresh.body, request.shared ? 'INFLIGHT' : 'MISS');
       } catch (error) {
-        if (stale) {
-          if (!request.shared) console.warn(`[launch-library-proxy] refresh failed (${error?.message || error}) — serving stale cache`);
-          send(res, 200, stale.body, 'STALE-ERROR');
-          return;
-        }
         send(
           res,
           Number.isInteger(error?.upstreamStatus) ? error.upstreamStatus : 502,
@@ -4357,6 +4363,8 @@ const CALTRANS_CACHE_PATH = path.join(process.cwd(), '.gev-cache', 'caltrans-cct
 /** @type {{key: string|null, at: number, cameras: Array<object>}|null} */
 let _caltransCache = null;
 let _caltransInflight = null;
+/** Bumped per completed download, so a catalog refresh that overlapped one knows to retry. */
+let _caltransLandedCount = 0;
 
 async function getCaltransSources() {
   const key = String(process.env.CCTV_CALTRANS_DISTRICTS ?? DEFAULT_CALTRANS_DISTRICTS);
@@ -4374,6 +4382,7 @@ async function getCaltransSources() {
       .then(async (cameras) => {
         if (!cameras.length) return cameras;
         _caltransCache = { key, at: Date.now(), cameras };
+        _caltransLandedCount += 1;
         _cctvSourceCacheAt = 0; // the next catalog request picks the cameras up
         try {
           await fsp.mkdir(path.dirname(CALTRANS_CACHE_PATH), { recursive: true });
@@ -4427,6 +4436,7 @@ async function refreshCctvSources() {
   let fromAustin = [];
   let fromCaltrans = [];
   let fromTfl = [];
+  const caltransLandedBefore = _caltransLandedCount;
   if (needsLiveSources) {
     const [austinResult, caltransResult, tflResult] = await Promise.allSettled([
       loadAustinSourcesFromOpenData(),
@@ -4465,7 +4475,9 @@ async function refreshCctvSources() {
     // which (with single-flight) bounds load on a persistently-down upstream.
     console.warn(`[CCTV] source refresh returned empty; serving ${_cctvSourceCache.length} stale cameras`);
   }
-  _cctvSourceCacheAt = Date.now();
+  // A Caltrans download that landed mid-refresh is not in this catalog yet:
+  // keep it stale so the next request rebuilds with those cameras.
+  _cctvSourceCacheAt = _caltransLandedCount === caltransLandedBefore ? Date.now() : 0;
   return _cctvSourceCache;
 }
 
@@ -8341,6 +8353,9 @@ export default defineConfig(({ mode }) => {
       allowedHosts: (env.HOST === '0.0.0.0' || env.HOST === '::')
         ? true
         : ['localhost', '127.0.0.1', '.local'],
+      // The proxies write their caches here every few seconds; watching it
+      // only wastes file handles (and stray HTML there triggers reloads).
+      watch: { ignored: ['**/.gev-cache/**'] },
     },
     // Expose selected API keys to the browser via import.meta.env.*
     define: {

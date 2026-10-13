@@ -156,3 +156,19 @@ test('adsbdb proxy rate-limits only upstream lookups, never cached answers', () 
   assert.match(proxy, /if \(limited\(cache\.routes, cs\)\) return;\s*const data = await lookup\('route', cs\);/);
   assert.match(proxy, /if \(limited\(cache\.aircraft, hex\)\) return;\s*const data = await lookup\('aircraft', hex\);/);
 });
+
+test('a Caltrans download landing mid-refresh is not masked by the catalog timestamp', () => {
+  const refresh = CONFIG.slice(CONFIG.indexOf('async function refreshCctvSources('), CONFIG.indexOf('function buildSyntheticCctvSvg('));
+  assert.match(refresh, /const caltransLandedBefore = _caltransLandedCount;/);
+  assert.match(refresh, /_cctvSourceCacheAt = _caltransLandedCount === caltransLandedBefore \? Date\.now\(\) : 0;/);
+  assert.match(CONFIG, /_caltransLandedCount \+= 1;\s*_cctvSourceCacheAt = 0;/);
+});
+
+test('dev server does not watch the proxy cache directory', () => {
+  assert.match(CONFIG, /watch: \{ ignored: \['\*\*\/\.gev-cache\/\*\*'\] \}/);
+});
+
+test('launches proxy serves the expired cache while it revalidates (upstream takes ~8 s)', () => {
+  const handler = CONFIG.slice(CONFIG.indexOf("middlewares.use('/api/launches'"), CONFIG.indexOf("middlewares.use('/api/launches'") + 2000);
+  assert.match(handler, /if \(stale\) \{[\s\S]*?request\.promise\.catch\([\s\S]*?send\(res, 200, stale\.body, 'STALE-REVALIDATING'\);\s*return;\s*\}/);
+});
