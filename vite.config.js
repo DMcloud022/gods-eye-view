@@ -31,6 +31,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import https from 'node:https';
 import { lookup as lookupDns } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { directionToHeading } from './src/data/directionText.js';
 import {
   isValidTileCoord as isValidTomTomTile,
@@ -3056,6 +3057,17 @@ function openSkySourceIsStale(sourceEpochMs, now = Date.now()) {
     && now - sourceEpochMs > OPENSKY_SOURCE_STALE_MS;
 }
 
+/** Same host rule as server.allowedHosts: local names and IP literals (never a rebinding target). */
+export function isAllowedApiHost(hostHeader, allowAnyHost = false) {
+  if (allowAnyHost || !hostHeader) return true;
+  const hostname = String(hostHeader).toLowerCase().replace(/:\d+$/, '').replace(/^\[(.*)\]$/, '$1');
+  return hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === 'local'
+    || hostname.endsWith('.local')
+    || isIP(hostname) !== 0;
+}
+
 /**
  * Vite plugin: reject cross-origin requests to every /api route.
  *
@@ -3065,11 +3077,21 @@ function openSkySourceIsStale(sourceEpochMs, now = Date.now()) {
  * Origin header that doesn't match Host; same-origin app calls and non-browser
  * clients (curl, tests) send neither and pass through untouched.
  *
+ * It also enforces the server.allowedHosts rule for /api: Vite's own host check
+ * runs after plugin middleware, so without this a DNS-rebinding page (its own
+ * domain resolved to 127.0.0.1, therefore "same-origin") could use the proxies.
+ *
+ * @param {{ allowAnyHost?: boolean }} [options]
  * @returns {import('vite').Plugin}
  */
-function sameOriginApiGuard() {
+function sameOriginApiGuard({ allowAnyHost = false } = {}) {
   function install(middlewares) {
     middlewares.use('/api', (req, res, next) => {
+      if (!isAllowedApiHost(req.headers.host, allowAnyHost)) {
+        res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Host not allowed' }));
+        return;
+      }
       const origin = req.headers.origin;
       let crossOrigin = req.headers['sec-fetch-site'] === 'cross-site';
       if (!crossOrigin && origin) {
@@ -8322,7 +8344,7 @@ export default defineConfig(({ mode }) => {
   const env = { ...process.env };
   return {
     plugins: [
-      sameOriginApiGuard(), // first, so it runs before every /api handler
+      sameOriginApiGuard({ allowAnyHost: env.HOST === '0.0.0.0' || env.HOST === '::' }), // first, before every /api handler
       cesium(),
       openSkyProxy(),
       celestrakProxy(),
