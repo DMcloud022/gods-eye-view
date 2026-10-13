@@ -15,6 +15,10 @@ URL="http://localhost:${PORT}/"
 LOG_FILE="${ROOT_DIR}/.gev-cache/launcher.log"
 WAIT_SECONDS=90
 
+notify() {
+  /usr/bin/osascript -e "display notification \"$1\" with title \"God's Eye View\"" >/dev/null 2>&1 || true
+}
+
 notify_error() {
   /usr/bin/osascript -e "display dialog \"$1\" with title \"God's Eye View\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null 2>&1 || true
 }
@@ -38,6 +42,23 @@ if [[ ! -d node_modules ]]; then
 fi
 
 mkdir -p "$(dirname "${LOG_FILE}")"
+
+# Only one launch may start the server: dev-fresh.sh stops every running
+# instance first, so a second quick double-click would kill the first start.
+LOCK_DIR="${ROOT_DIR}/.gev-cache/launcher.lock"
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  sleep 1
+  LOCK_PID="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+  if [[ -n "${LOCK_PID}" ]] && kill -0 "${LOCK_PID}" 2>/dev/null; then
+    exit 0  # The launch already in progress opens the browser.
+  fi
+  rm -rf "${LOCK_DIR}"  # Left behind by an interrupted launch.
+  mkdir "${LOCK_DIR}" 2>/dev/null || exit 0
+fi
+echo $$ >"${LOCK_DIR}/pid"
+trap 'rm -rf "${LOCK_DIR}"' EXIT
+
+notify "Starting… the map opens in your browser in a few seconds."
 HOST=localhost PORT="${PORT}" nohup ./scripts/dev-fresh.sh >"${LOG_FILE}" 2>&1 </dev/null &
 
 for ((i = 0; i < WAIT_SECONDS; i++)); do
