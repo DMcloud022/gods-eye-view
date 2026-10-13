@@ -872,6 +872,8 @@ function buildingPitch(bounds) {
   return -32;
 }
 
+const BUILDING_BOUNDS_WAIT_MS = 1500;
+
 async function resolveBuildingBounds(lat, lon, query) {
   const overpassQuery = `
     [out:json][timeout:10];
@@ -885,8 +887,10 @@ async function resolveBuildingBounds(lat, lon, query) {
     );
     out tags center geom;
   `;
+  // The flight waits on this lookup, so keep the wait short: the outline only
+  // refines framing, and the /api/overpass proxy caches a late answer for next time.
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 6000);
+  const timeout = window.setTimeout(() => controller.abort(), BUILDING_BOUNDS_WAIT_MS);
   try {
     const response = await fetch('/api/overpass', {
       method: 'POST',
