@@ -6115,16 +6115,30 @@ const _NAV_PLACES = {
 // Regex to detect navigation-intent prefixes in English and Filipino.
 const _NAV_INTENT_RE = /^(?:go\s+to|fly\s+to|take\s+me\s+to|show\s+me|navigate\s+to|head\s+to|bring\s+me\s+to|jump\s+to|punta\s+(?:sa\s+)?|pumunta\s+sa\s+|dalhin\s+ako\s+sa\s+|ipakita\s+(?:ang\s+|mo\s+)?)\s*(.+)/i;
 
-// If `transcript` is a simple navigation command for a pre-indexed place, return
-// a ready-to-dispatch fly_to_location tool call so the LLM is skipped entirely.
-// Returns null when the intent is unclear or the destination is not pre-indexed.
-function resolveNavigationIntent(transcript) {
-  const m = transcript.trim().match(_NAV_INTENT_RE);
-  if (!m) return null;
-  const dest = m[1].trim().replace(/[.!?,]+$/, '').toLowerCase();
+// Verbs that only ever mean "move the camera to a place", so any destination
+// can go straight to the geocoder. Ambiguous verbs ("show me") stay limited to
+// pre-indexed places above.
+const _NAV_GEOCODE_RE = /^(?:go\s+to|fly\s+to|take\s+me\s+to|navigate\s+to|head\s+to|bring\s+me\s+to|jump\s+to|where\s+is|where's|locate|search\s+for|search|punta\s+(?:sa\s+)?|pumunta\s+sa\s+|dalhin\s+ako\s+sa\s+)\s+(.+)/i;
+// Destinations that name app features rather than places are left to the LLM.
+const _NAV_APP_TARGET_RE = /\b(?:globe|home|next|previous|shot|scene|layers?|flights?|planes?|aircraft|satellites?|iss|ships?|vessels?|cctv|cameras?|traffic|weather|earthquakes?|radio|launch(?:es)?|overview|view|mode|my\s+location)\b/i;
+
+// If `transcript` is a simple navigation command, return a ready-to-dispatch
+// fly_to_location tool call so the LLM is skipped entirely. Pre-indexed places
+// use their tuned preset; other destinations after an unambiguous navigation
+// verb are geocoded by the client. Returns null when the intent is unclear.
+export function resolveNavigationIntent(transcript) {
+  const text = String(transcript || '').trim();
+  const m = text.match(_NAV_INTENT_RE);
+  const dest = m ? m[1].trim().replace(/[.!?,]+$/, '').toLowerCase() : '';
   const place = dest ? _NAV_PLACES[dest] : null;
-  if (!place) return null;
-  return { name: 'fly_to_location', arguments: JSON.stringify(place) };
+  if (place) return { name: 'fly_to_location', arguments: JSON.stringify(place) };
+  const g = text.match(_NAV_GEOCODE_RE);
+  if (!g) return null;
+  const query = g[1].trim().replace(/[.!?,]+$/, '').replace(/\s+please$/i, '').trim();
+  if (query.length < 2 || query.length > 120 || _NAV_APP_TARGET_RE.test(query)) return null;
+  const preset = _NAV_PLACES[query.toLowerCase()];
+  if (preset) return { name: 'fly_to_location', arguments: JSON.stringify(preset) };
+  return { name: 'fly_to_location', arguments: JSON.stringify({ query }) };
 }
 
 function readRequestBody(req, maxBytes = 1024 * 1024) {

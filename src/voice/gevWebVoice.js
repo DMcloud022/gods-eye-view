@@ -9,6 +9,7 @@ const WEB_VOICE_STATUS = {
 
 const MAX_HISTORY_TURNS = 8;
 const MIN_TRANSCRIPT_CHARS = 2;
+const MAX_PLACE_FALLBACK_WORDS = 6;
 
 const SpeechRecognitionAPI =
   typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -226,6 +227,7 @@ export class GevWebVoiceController {
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.error) {
+        if (response.status >= 500 && await this._flyToPlace(transcript, abortCtrl.signal)) return;
         const msg = response.status === 429 ? 'Too many requests — wait a moment'
           : response.status >= 500 ? 'Voice service error — tap to retry'
           : 'Voice unavailable — tap to retry';
@@ -235,6 +237,7 @@ export class GevWebVoiceController {
       const { reply = '', tool_calls = [] } = data;
 
       let toolError = null;
+      let flownTo = null;
       for (const tc of tool_calls) {
         if (abortCtrl.signal.aborted) break;
         try {
@@ -243,8 +246,10 @@ export class GevWebVoiceController {
             signal: abortCtrl.signal,
             isCurrent: () => !abortCtrl.signal.aborted,
           });
-          if (result && result.ok === false && result.error && !toolError) {
-            toolError = result.error;
+          if (result?.ok && tc.name === 'fly_to_location') flownTo = result.label || args.query || null;
+          if (result && result.ok === false && !result.cancelled && !toolError) {
+            toolError = result.error
+              || (tc.name === 'fly_to_location' && args.query ? `Couldn't find "${args.query}"` : null);
           }
         } catch (err) {
           console.warn('[GevWebVoice] tool error:', tc.name, err?.message);
@@ -264,15 +269,38 @@ export class GevWebVoiceController {
       if (!abortCtrl.signal.aborted && this.status !== 'idle') {
         const nextDetail = toolError && !reply
           ? toolError.slice(0, 80)
-          : 'Tap mic to speak';
+          : (flownTo ? `→ ${String(flownTo).slice(0, 60)}` : 'Tap mic to speak');
         this.setStatus('listening', nextDetail);
       }
     } catch (err) {
       if (abortCtrl.signal.aborted) return;
       console.error('[GevWebVoice] chat error:', err?.message);
-      if (this.status !== 'idle') this.setStatus('listening', 'Tap mic to speak');
+      if (await this._flyToPlace(transcript, abortCtrl.signal)) return;
+      if (this.status !== 'idle') {
+        this.setStatus('listening', err?.name === 'TimeoutError'
+          ? 'Voice service timed out — tap to retry'
+          : 'Voice service error — tap to retry');
+      }
     } finally {
       if (this.abortController === abortCtrl) this.abortController = null;
+    }
+  }
+
+  // When the chat service is down or slow, a short phrase is most likely a
+  // place name ("Tokyo", "Eiffel Tower"): geocode it and fly there directly.
+  async _flyToPlace(transcript, signal) {
+    const query = transcript.replace(/[.!?,]+$/, '').trim();
+    if (signal.aborted || !query || query.split(/\s+/).length > MAX_PLACE_FALLBACK_WORDS) return false;
+    try {
+      const result = await this.runner('fly_to_location', { query }, {
+        signal,
+        isCurrent: () => !signal.aborted,
+      });
+      if (!result?.ok) return false;
+      if (this.status !== 'idle') this.setStatus('listening', `→ ${String(result.label || query).slice(0, 60)}`);
+      return true;
+    } catch {
+      return false;
     }
   }
 
